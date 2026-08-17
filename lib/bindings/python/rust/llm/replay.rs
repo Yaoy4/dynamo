@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -48,6 +49,12 @@ pub struct OfflineReplayResult {
     lifecycle_operations: Vec<dynamo_mocker::replay::LifecycleOperation>,
     capture_per_request: bool,
     coverage: OfflineReplayCoverage,
+    /// Per-operator AIC latency percentages, one entry per worker role
+    /// (`"aggregated"`, or `"prefill"`/`"decode"` under disagg), each keyed
+    /// by AIC's own operator names (e.g. `"context_qkv_gemm"`). `None` when
+    /// no role in this run had an AIC backend configured. See
+    /// [`extract_aic_latency_breakdown`].
+    aic_latency_breakdown: Option<HashMap<String, HashMap<String, f64>>>,
 }
 
 impl OfflineReplayResult {
@@ -56,6 +63,7 @@ impl OfflineReplayResult {
         capture_per_request: bool,
         capture_planner_details: bool,
         runtime_evidence: dynamo_mocker::replay::OfflineRuntimeEvidence,
+        aic_latency_breakdown: Option<HashMap<String, HashMap<String, f64>>>,
     ) -> Self {
         let dynamo_mocker::replay::OfflineRuntimeEvidence {
             lifecycle_operations,
@@ -71,6 +79,7 @@ impl OfflineReplayResult {
             lifecycle_operations,
             capture_per_request,
             coverage,
+            aic_latency_breakdown,
         }
     }
 }
@@ -106,6 +115,18 @@ impl OfflineReplayResult {
         pythonize(py, &self.lifecycle_operations)
             .map(Bound::unbind)
             .map_err(to_pyerr)
+    }
+
+    /// Per-operator AIC latency breakdown for this run, e.g.
+    /// `{"aggregated": {"context_qkv_gemm": 12.3, "context_attention": 8.1, ...}}`
+    /// (or `{"prefill": {...}, "decode": {...}}` under disagg). `None` when
+    /// no worker role in this run had an AIC backend configured.
+    #[getter]
+    fn aic_latency_breakdown(&self, py: Python<'_>) -> PyResult<PyObject> {
+        match &self.aic_latency_breakdown {
+            Some(breakdown) => pythonize(py, breakdown).map(Bound::unbind).map_err(to_pyerr),
+            None => Ok(py.None()),
+        }
     }
 }
 
@@ -1029,6 +1050,14 @@ pub fn run_mocker_trace_replay(
         num_prefill_workers,
         num_decode_workers,
     )?;
+    // Snapshot `Arc<PerfModel>` clones now — `args_selection` is moved into
+    // the AIC engine + the simulation below, so this is the last point
+    // before the underlying `RustAicCallback`'s accumulator (mutated during
+    // the run) is only reachable through a reference we don't otherwise keep.
+    // Percentages are read back out via `finalize_aic_latency_breakdown` once
+    // `run(...)` below has completed — NOT here (the accumulator is empty
+    // until the run has actually made some predict calls).
+    let aic_perf_models = capture_aic_perf_models(&args_selection);
     let router_mode = parse_replay_router_mode(router_mode)?;
     let trace_format = parse_trace_file_format(trace_format)?;
     dynamo_mocker::loadgen::validate_trace_files(trace_format, &trace_files).map_err(to_pyerr)?;
@@ -1243,6 +1272,7 @@ pub fn run_mocker_trace_replay(
             .map_err(to_pyerr)?;
     }
     if is_offline {
+        let aic_latency_breakdown = finalize_aic_latency_breakdown(&aic_perf_models);
         return Py::new(
             py,
             OfflineReplayResult::new(
@@ -1250,6 +1280,7 @@ pub fn run_mocker_trace_replay(
                 record_per_request,
                 capture_planner_details,
                 runtime_evidence,
+                aic_latency_breakdown,
             ),
         )
         .map(Py::into_any);
@@ -1497,6 +1528,8 @@ pub fn run_mocker_synthetic_trace_replay(
         num_prefill_workers,
         num_decode_workers,
     )?;
+    // See the comment on the equivalent line in `run_mocker_trace_replay`.
+    let aic_perf_models = capture_aic_perf_models(&args_selection);
     let router_mode = parse_replay_router_mode(router_mode)?;
     let (prefill_load_estimator, _) = load_replay_prefill_load_estimator(
         py,
@@ -1771,6 +1804,7 @@ pub fn run_mocker_synthetic_trace_replay(
         (report.map_err(to_pyerr)?, evidence)
     };
     if is_offline {
+        let aic_latency_breakdown = finalize_aic_latency_breakdown(&aic_perf_models);
         return Py::new(
             py,
             OfflineReplayResult::new(
@@ -1778,6 +1812,7 @@ pub fn run_mocker_synthetic_trace_replay(
                 record_per_request,
                 capture_planner_details,
                 runtime_evidence,
+                aic_latency_breakdown,
             ),
         )
         .map(Py::into_any);
@@ -1788,6 +1823,48 @@ pub fn run_mocker_synthetic_trace_replay(
 enum ReplayArgsSelection {
     Aggregated(Box<RsMockEngineArgs>),
     Disagg(Box<dynamo_mocker::replay::OfflineDisaggReplayConfig>),
+}
+
+/// `Arc<PerfModel>` clones for every worker role materialized in `sel`, keyed
+/// by role name (`"aggregated"`, or `"prefill"`/`"decode"` under disagg).
+/// Must be called before `sel` is moved into the simulation
+/// (`select_replay_dispatch` / `simulate_*`) — that move consumes `sel`, so
+/// this is the last point the perf models are reachable without one. Cloning
+/// the `Arc` (cheap: bumps a refcount, does not duplicate the underlying
+/// `RustAicCallback`/accumulator) is what lets [`finalize_aic_latency_breakdown`]
+/// read the SAME accumulator's final state, mutated via the other `Arc` clone
+/// that actually goes into the run, once the run has completed. Querying
+/// percentages here (before the run) would only ever see an empty
+/// accumulator — do not call `latency_breakdown_percentages` at this point.
+fn capture_aic_perf_models(sel: &ReplayArgsSelection) -> HashMap<String, Arc<PerfModel>> {
+    let roles: Vec<(&'static str, Arc<PerfModel>)> = match sel {
+        ReplayArgsSelection::Aggregated(args) => vec![("aggregated", args.perf_model.clone())],
+        ReplayArgsSelection::Disagg(config) => vec![
+            ("prefill", config.prefill_args.perf_model.clone()),
+            ("decode", config.decode_args.perf_model.clone()),
+        ],
+    };
+    roles
+        .into_iter()
+        .map(|(role, perf_model)| (role.to_string(), perf_model))
+        .collect()
+}
+
+/// Per-operator AIC latency percentages for every role in `models`, read
+/// AFTER the simulation run has completed (see [`capture_aic_perf_models`]).
+/// `None` per role when that role has no AIC backend configured (or its
+/// `AicCallback` doesn't implement the breakdown), and `None` overall when
+/// nothing recorded anything.
+fn finalize_aic_latency_breakdown(
+    models: &HashMap<String, Arc<PerfModel>>,
+) -> Option<HashMap<String, HashMap<String, f64>>> {
+    let mut out = HashMap::new();
+    for (role, perf_model) in models {
+        if let Some(pct) = perf_model.latency_breakdown_percentages() {
+            out.insert(role.clone(), pct);
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 enum ReplayDispatch {

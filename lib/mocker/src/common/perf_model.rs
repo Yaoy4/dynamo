@@ -12,6 +12,7 @@ use ndarray::{Array1, Array2};
 use ndarray_interp::InterpolateError;
 use ndarray_interp::interp1d::{Interp1DBuilder, Linear};
 use ndarray_interp::interp2d::{Bilinear, Interp2DBuilder};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -40,6 +41,18 @@ pub trait AicCallback: Send + Sync {
     /// Predict decode (generation) latency in ms.
     /// Parameters: (batch_size, isl, osl)
     fn predict_decode(&self, batch_size: usize, isl: usize, osl: usize) -> Result<f64>;
+
+    /// Every AIC operator's cumulative share of total predicted latency (percent),
+    /// across every `predict_prefill`/`predict_decode` call made so far on this
+    /// callback. Keyed by AIC's own operator names (e.g. `"context_qkv_gemm"`,
+    /// `"context_attention"`, `"context_moe"`).
+    ///
+    /// Default `None`: only implementors backed by AIC's compiled Rust engine
+    /// (which can report a per-operator breakdown) override this; the
+    /// polynomial/interpolated `PerfModel` variants have no such breakdown.
+    fn latency_breakdown_percentages(&self) -> Option<HashMap<String, f64>> {
+        None
+    }
 }
 
 /// Wrapper to implement PrefillInterpolator for the concrete Interp1D type
@@ -215,6 +228,18 @@ impl PerfModel {
     /// Create an Aiconfigurator perf model from a callback.
     pub fn from_aic_callback(callback: Arc<dyn AicCallback>) -> Self {
         PerfModel::Aiconfigurator { callback }
+    }
+
+    /// Every AIC operator's cumulative share of total predicted latency so
+    /// far (percent), keyed by AIC's own operator names. `None` for the
+    /// `Polynomial`/`Interpolated` variants (no per-operator breakdown
+    /// exists for those) or when the underlying `AicCallback` doesn't
+    /// implement it. See [`AicCallback::latency_breakdown_percentages`].
+    pub fn latency_breakdown_percentages(&self) -> Option<HashMap<String, f64>> {
+        match self {
+            PerfModel::Aiconfigurator { callback } => callback.latency_breakdown_percentages(),
+            _ => None,
+        }
     }
 
     /// Predict prefill time in milliseconds.

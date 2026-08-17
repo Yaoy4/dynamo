@@ -203,3 +203,11 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
+
+# Local vendored copy of aiconfigurator-core (see third_party/aiconfigurator-core),
+# patched to expose a per-operator latency breakdown (name -> latency_ms) alongside
+# the existing aggregate `prefill_latency_ms` / `decode_latency_ms` predictions, so
+# RustAicCallback (lib/bindings/python/rust/llm/aic_callback.rs) can record which
+# operator each forward pass spent time in and its share of the total.
+[patch.crates-io]
+aiconfigurator-core = { path = "third_party/aiconfigurator-core" }

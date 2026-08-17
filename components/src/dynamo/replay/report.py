@@ -46,6 +46,12 @@ class ReplayReport:
     per_request: list[dict[str, Any]] | None
     coverage: dict[str, Any]
     planner: PlannerReplayDetails | None
+    # Per-operator AIC latency percentages for this run, one entry per worker
+    # role (e.g. "aggregated", or "prefill"/"decode" under disagg), each keyed
+    # by AIC's own operator names. None when no worker role had an AIC
+    # backend configured. See `OfflineReplayResult::aic_latency_breakdown`
+    # (lib/bindings/python/rust/llm/replay.rs).
+    aic_latency_breakdown: dict[str, dict[str, float]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -53,4 +59,5 @@ class ReplayReport:
             "per_request": self.per_request,
             "coverage": self.coverage,
             "planner": None if self.planner is None else self.planner.to_dict(),
+            "aic_latency_breakdown": self.aic_latency_breakdown,
         }

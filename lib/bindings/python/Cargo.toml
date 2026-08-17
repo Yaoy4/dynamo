@@ -128,3 +128,14 @@ tracing-subscriber = { version = "0.3", features = ["registry"] }
 inherits = "release"
 debug = true
 strip = false
+
+# This crate has its OWN [workspace] (see top of file — excluded from the
+# top-level workspace for the pyo3 build constraint), so a [patch] in the
+# repo-root Cargo.toml does NOT apply here; it must be repeated in this
+# crate's own workspace root. Points at the local vendored copy of
+# aiconfigurator-core (../../../third_party/aiconfigurator-core), patched to
+# add a per-operator latency breakdown API (`prefill_latency_breakdown_ms` /
+# `decode_latency_breakdown_ms` on `AicEngine`, consumed by
+# RustAicCallback in rust/llm/aic_callback.rs).
+[patch.crates-io]
+aiconfigurator-core = { path = "../../../third_party/aiconfigurator-core" }
