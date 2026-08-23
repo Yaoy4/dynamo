@@ -80,7 +80,16 @@ impl AicCallback for RustAicCallback {
                 (effective_isl + prefix) as u32,
                 prefix as u32,
             )
-            .map_err(|error| anyhow::anyhow!("AIC predict_prefill (rust) failed: {error}"))?;
+            .map_err(|error| {
+                // `{error}` (Display) below is the message the caller's anyhow
+                // context eventually surfaces to Python; `{error:?}` (Debug) is
+                // strictly more detailed for the crate's structured `AicError`
+                // variants (e.g. `PerfDatabase` carries the missing quant-mode
+                // key), so log it at debug level for local troubleshooting
+                // without changing what callers see.
+                tracing::debug!(error = ?error, "AIC predict_prefill failed");
+                anyhow::anyhow!("AIC predict_prefill (rust) failed: {error}")
+            })?;
         if tracing::enabled!(tracing::Level::TRACE) {
             tracing::trace!(
                 total_ms = step.total_ms,
@@ -97,7 +106,10 @@ impl AicCallback for RustAicCallback {
         let step = self
             .engine
             .decode_latency_breakdown_ms(batch_size as u32, isl as u32, osl as u32)
-            .map_err(|error| anyhow::anyhow!("AIC predict_decode (rust) failed: {error}"))?;
+            .map_err(|error| {
+                tracing::debug!(error = ?error, "AIC predict_decode failed");
+                anyhow::anyhow!("AIC predict_decode (rust) failed: {error}")
+            })?;
         if tracing::enabled!(tracing::Level::TRACE) {
             tracing::trace!(
                 total_ms = step.total_ms,
