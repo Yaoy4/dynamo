@@ -158,6 +158,10 @@ pub(crate) struct AdmissionEvent {
 #[derive(Debug, Clone)]
 pub(crate) struct EnginePassResult {
     pub(crate) end_ms: f64,
+    /// Modelled context/prefill duration for this scheduler pass, in ms.
+    pub(crate) prefill_time_ms: f64,
+    /// Modelled generation/decode duration for this scheduler pass, in ms.
+    pub(crate) decode_time_ms: f64,
     pub(crate) completed_requests: usize,
     pub(crate) output_signals: Vec<OutputSignal>,
     pub(crate) admissions: Vec<AdmissionEvent>,

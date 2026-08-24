@@ -3,17 +3,22 @@
 
 //! Python↔Rust bridge for the AIC (AI Configurator) perf model.
 //!
-//! [`RustAicCallback`] wraps a compiled `aiconfigurator_core::AicEngine` and
-//! answers the mocker/router latency predictions purely in Rust — no GIL on the
-//! predict hot path. Engine build failures are hard errors. KV-block sizing still
-//! crosses into Python via [`estimate_aic_num_gpu_blocks`].
+//! Two provenances for the same predictions:
+//!
+//! * `SILICON` — [`RustAicCallback`] wraps a compiled `aiconfigurator_core::AicEngine`
+//!   and answers purely in Rust, no GIL on the predict hot path. This reads
+//!   collected perf grids (parquet) off disk.
+//! * `ANALYTICAL` — [`PyAicCallback`] delegates to a Python `AicSession`, which
+//!   computes every kernel at query time from a vendor analytical model. The
+//!   compiled engine cannot serve this: it never re-enters Python, so it cannot
+//!   see the analytical backend that lives there.
+//!
+//! Engine build failures are hard errors. KV-block sizing always crosses into
+//! Python via [`estimate_aic_num_gpu_blocks`].
 
-#[cfg(feature = "aic-forward-pass")]
 use std::collections::HashMap;
 use std::sync::Arc;
-#[cfg(feature = "aic-forward-pass")]
 use std::sync::{Mutex, OnceLock};
-#[cfg(feature = "aic-forward-pass")]
 use std::time::Duration;
 
 use pyo3::prelude::*;
@@ -23,6 +28,126 @@ use pyo3::types::PyDict;
 use aiconfigurator_core::{AicEngine, AicEngineBuilder, BackendKind};
 use dynamo_kv_router::PrefillLoadEstimator;
 use dynamo_mocker::common::perf_model::AicCallback;
+
+/// Perf-data mode that keeps predictions in Python because they are computed on
+/// demand rather than read from collected grids. Mirrors
+/// `dynamo._internal.aic.DATABASE_MODE_ANALYTICAL`.
+const DATABASE_MODE_ANALYTICAL: &str = "ANALYTICAL";
+
+fn is_analytical(database_mode: Option<&str>) -> bool {
+    database_mode
+        .map(|mode| mode.trim().eq_ignore_ascii_case(DATABASE_MODE_ANALYTICAL))
+        .unwrap_or(false)
+}
+
+/// AIC callback backed by a Python `AicSession`. Each predict call takes the
+/// GIL, which is the price of a perf model that is only expressible in Python.
+struct PyAicCallback {
+    session: Py<PyAny>,
+}
+
+impl PyAicCallback {
+    fn call(&self, method: &str, args: (usize, usize, usize)) -> anyhow::Result<f64> {
+        Python::with_gil(|py| {
+            self.session
+                .bind(py)
+                .call_method1(method, args)?
+                .extract::<f64>()
+        })
+        .map_err(|error: PyErr| anyhow::anyhow!("AIC {method} (python) failed: {error}"))
+    }
+}
+
+impl AicCallback for PyAicCallback {
+    fn predict_prefill(
+        &self,
+        batch_size: usize,
+        effective_isl: usize,
+        prefix: usize,
+    ) -> anyhow::Result<f64> {
+        self.call("predict_prefill", (batch_size, effective_isl, prefix))
+    }
+
+    fn predict_decode(&self, batch_size: usize, isl: usize, osl: usize) -> anyhow::Result<f64> {
+        self.call("predict_decode", (batch_size, isl, osl))
+    }
+}
+
+impl PrefillLoadEstimator for PyAicCallback {
+    fn predict_prefill_duration(
+        &self,
+        batch_size: usize,
+        effective_isl: usize,
+        prefix: usize,
+    ) -> anyhow::Result<Duration> {
+        let latency_ms = self.call("predict_prefill", (batch_size, effective_isl, prefix))?;
+        Ok(Duration::from_secs_f64(latency_ms / 1000.0))
+    }
+}
+
+/// Build the Python `AicSession` ONCE per identity and cache it. Sessions are
+/// stateless predictors, so prefill+decode callbacks can share one.
+#[allow(clippy::too_many_arguments)]
+fn build_python_session(
+    py: Python<'_>,
+    backend_name: &str,
+    system: &str,
+    model_path: &str,
+    tp_size: usize,
+    backend_version: Option<&str>,
+    moe_tp_size: Option<usize>,
+    moe_ep_size: Option<usize>,
+    attention_dp_size: Option<usize>,
+    gemm_dtype: Option<&str>,
+    moe_dtype: Option<&str>,
+    fmha_dtype: Option<&str>,
+    kv_cache_dtype: Option<&str>,
+    comm_dtype: Option<&str>,
+    nextn: Option<usize>,
+    nextn_accept_rates: Option<&str>,
+    database_mode: Option<&str>,
+    xe_compute_config: Option<&str>,
+) -> PyResult<Arc<PyAicCallback>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<PyAicCallback>>>> = OnceLock::new();
+    let key = format!(
+        "{backend_name}|{system}|{backend_version:?}|{model_path}|{tp_size}|{moe_tp_size:?}|{moe_ep_size:?}|{attention_dp_size:?}|{gemm_dtype:?}|{moe_dtype:?}|{fmha_dtype:?}|{kv_cache_dtype:?}|{comm_dtype:?}|{nextn:?}|{database_mode:?}|{xe_compute_config:?}"
+    );
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(existing) = cache.lock().unwrap().get(&key) {
+        return Ok(Arc::clone(existing));
+    }
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("backend_name", backend_name)?;
+    kwargs.set_item("system", system)?;
+    kwargs.set_item("model_path", model_path)?;
+    kwargs.set_item("tp_size", tp_size)?;
+    kwargs.set_item("backend_version", backend_version)?;
+    kwargs.set_item("moe_tp_size", moe_tp_size)?;
+    kwargs.set_item("moe_ep_size", moe_ep_size)?;
+    kwargs.set_item("attention_dp_size", attention_dp_size)?;
+    kwargs.set_item("gemm_dtype", gemm_dtype)?;
+    kwargs.set_item("moe_dtype", moe_dtype)?;
+    kwargs.set_item("fmha_dtype", fmha_dtype)?;
+    kwargs.set_item("kv_cache_dtype", kv_cache_dtype)?;
+    kwargs.set_item("comm_dtype", comm_dtype)?;
+    kwargs.set_item("nextn", nextn)?;
+    kwargs.set_item("nextn_accept_rates", nextn_accept_rates)?;
+    kwargs.set_item("database_mode", database_mode)?;
+    kwargs.set_item("xe_compute_config", xe_compute_config)?;
+
+    let session = py
+        .import("dynamo._internal.aic")?
+        .call_method("create_session", (), Some(&kwargs))?
+        .unbind();
+    tracing::info!(
+        "AIC: using PyAicCallback for {model_path} / {system} / {backend_name} \
+         (database_mode={database_mode:?}); predictions are computed in Python"
+    );
+    let arc = Arc::new(PyAicCallback { session });
+    cache.lock().unwrap().insert(key, Arc::clone(&arc));
+    Ok(arc)
+}
 
 /// Pure-Rust AIC callback: wraps an `aiconfigurator_core::AicEngine`
 /// compiled once at startup and answers predict calls with NO PyO3 / GIL on the
@@ -213,7 +338,8 @@ fn build_rust_engine(
 }
 
 /// Build the AIC latency callback. Called once at mocker startup when
-/// `--aic-perf-model` is requested. Requires the `aic-forward-pass` feature.
+/// `--aic-perf-model` is requested. The SILICON path requires the
+/// `aic-forward-pass` feature; the ANALYTICAL path is pure PyO3.
 #[cfg_attr(not(feature = "aic-forward-pass"), allow(unused_variables))]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create_aic_callback(
@@ -233,7 +359,31 @@ pub(super) fn create_aic_callback(
     comm_dtype: Option<&str>,
     nextn: Option<usize>,
     nextn_accept_rates: Option<&str>,
+    database_mode: Option<&str>,
+    xe_compute_config: Option<&str>,
 ) -> PyResult<Arc<dyn AicCallback>> {
+    if is_analytical(database_mode) {
+        return Ok(build_python_session(
+            py,
+            backend_name,
+            system,
+            model_path,
+            tp_size,
+            backend_version,
+            moe_tp_size,
+            moe_ep_size,
+            attention_dp_size,
+            gemm_dtype,
+            moe_dtype,
+            fmha_dtype,
+            kv_cache_dtype,
+            comm_dtype,
+            nextn,
+            nextn_accept_rates,
+            database_mode,
+            xe_compute_config,
+        )?);
+    }
     #[cfg(feature = "aic-forward-pass")]
     {
         let engine = build_rust_engine(
@@ -262,8 +412,9 @@ pub(super) fn create_aic_callback(
     ))
 }
 
-/// Build the AIC prefill-load estimator for the KV router / live path. Requires
-/// the `aic-forward-pass` feature; compiled-engine build failures are hard errors.
+/// Build the AIC prefill-load estimator for the KV router / live path. The
+/// SILICON path requires the `aic-forward-pass` feature and treats compiled-engine
+/// build failures as hard errors; the ANALYTICAL path is pure PyO3.
 #[cfg_attr(not(feature = "aic-forward-pass"), allow(unused_variables))]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create_aic_prefill_load_estimator(
@@ -283,7 +434,31 @@ pub(super) fn create_aic_prefill_load_estimator(
     comm_dtype: Option<&str>,
     nextn: Option<usize>,
     nextn_accept_rates: Option<&str>,
+    database_mode: Option<&str>,
+    xe_compute_config: Option<&str>,
 ) -> PyResult<Arc<dyn PrefillLoadEstimator>> {
+    if is_analytical(database_mode) {
+        return Ok(build_python_session(
+            py,
+            backend_name,
+            system,
+            model_path,
+            tp_size,
+            backend_version,
+            moe_tp_size,
+            moe_ep_size,
+            attention_dp_size,
+            gemm_dtype,
+            moe_dtype,
+            fmha_dtype,
+            kv_cache_dtype,
+            comm_dtype,
+            nextn,
+            nextn_accept_rates,
+            database_mode,
+            xe_compute_config,
+        )?);
+    }
     #[cfg(feature = "aic-forward-pass")]
     {
         let engine = build_rust_engine(
@@ -334,6 +509,8 @@ pub(super) fn estimate_aic_num_gpu_blocks(
     fmha_dtype: Option<&str>,
     kv_cache_dtype: Option<&str>,
     comm_dtype: Option<&str>,
+    database_mode: Option<&str>,
+    xe_compute_config: Option<&str>,
 ) -> PyResult<usize> {
     let module = py.import("dynamo._internal.aic")?;
     let kwargs = PyDict::new(py);
@@ -355,6 +532,8 @@ pub(super) fn estimate_aic_num_gpu_blocks(
     kwargs.set_item("fmha_dtype", fmha_dtype)?;
     kwargs.set_item("kv_cache_dtype", kv_cache_dtype)?;
     kwargs.set_item("comm_dtype", comm_dtype)?;
+    kwargs.set_item("database_mode", database_mode)?;
+    kwargs.set_item("xe_compute_config", xe_compute_config)?;
     let blocks = module.call_method("estimate_num_gpu_blocks", (), Some(&kwargs))?;
     blocks.extract()
 }

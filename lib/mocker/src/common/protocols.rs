@@ -603,6 +603,8 @@ struct MockEngineArgsSerde {
     aic_backend: OptionalConfigValue<String>,
     aic_system: OptionalConfigValue<String>,
     aic_backend_version: OptionalConfigValue<String>,
+    aic_database_mode: OptionalConfigValue<String>,
+    aic_xe_compute_config: OptionalConfigValue<String>,
     aic_tp_size: OptionalConfigValue<usize>,
     aic_model_path: OptionalConfigValue<String>,
     aic_moe_tp_size: OptionalConfigValue<usize>,
@@ -765,6 +767,18 @@ pub struct MockEngineArgs {
     #[serde(skip)]
     #[builder(default = "None")]
     pub aic_backend_version: Option<String>,
+
+    /// Provenance of the AIC perf data: "SILICON" (collected grids, the default)
+    /// or "ANALYTICAL" (computed per query by a vendor analytical model).
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_database_mode: Option<String>,
+
+    /// Intel Xe compute-config name (e.g., "xe5_96") selecting the device the
+    /// analytical model describes. Required when aic_database_mode is ANALYTICAL.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_xe_compute_config: Option<String>,
 
     /// Tensor parallel size for AIC latency prediction.
     /// Only affects AIC performance model lookups, not mocker scheduling.
@@ -1212,6 +1226,12 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         }
         if let Some(aic_backend_version) = compat.aic_backend_version.into_nullable() {
             builder = builder.aic_backend_version(aic_backend_version);
+        }
+        if let Some(aic_database_mode) = compat.aic_database_mode.into_nullable() {
+            builder = builder.aic_database_mode(aic_database_mode);
+        }
+        if let Some(aic_xe_compute_config) = compat.aic_xe_compute_config.into_nullable() {
+            builder = builder.aic_xe_compute_config(aic_xe_compute_config);
         }
         if let Some(aic_tp_size) = compat.aic_tp_size.into_nullable() {
             builder = builder.aic_tp_size(aic_tp_size);

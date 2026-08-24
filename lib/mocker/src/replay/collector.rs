@@ -8,7 +8,7 @@ use serde::ser::{SerializeMap, Serializer};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use uuid::Uuid;
 
-use crate::common::protocols::OutputSignal;
+use crate::common::protocols::{ForwardPassSnapshot, OutputSignal};
 
 // 0.1% relative quantile error. The enlarged store covers latency/rate values
 // spanning roughly 10^28 within one sign while remaining bounded (~512 KiB for
@@ -33,6 +33,9 @@ pub struct TraceSimulationReport {
     /// request granularity should access this field directly and serialize
     /// it themselves (e.g., the `--per-request-jsonl` CLI path).
     pub per_request: Vec<PerRequestRecord>,
+    /// Per-scheduler-pass records. Intentionally NOT serialized into the
+    /// summary JSON; the `--per-pass-jsonl` CLI path writes them separately.
+    pub per_pass: Vec<ReplayPassRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +109,9 @@ pub struct TraceDistributionStats {
 #[derive(Debug, Clone)]
 pub struct TraceLatencyStats {
     pub ttft: TraceDistributionStats,
+    /// TTFT to the end of prefill compute, excluding the decode step in which
+    /// the scheduler actually samples the first token.
+    pub ttft_prefill_only: TraceDistributionStats,
     pub ttst: TraceDistributionStats,
     pub tpot: TraceDistributionStats,
     pub itl: TraceInterTokenLatencyStats,
@@ -117,6 +123,49 @@ pub struct TraceLatencyStats {
 pub struct TraceInterTokenLatencyStats {
     pub distribution: TraceDistributionStats,
     pub max_ms: f64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayPassStage {
+    Aggregated,
+    Prefill,
+    Decode,
+}
+
+/// One scheduler pass as observed by offline replay.
+///
+/// The request-level report cannot reconstruct dynamic batching because a
+/// request may wait across several passes. This record preserves the pass
+/// boundary and the scheduler's batch/queue snapshot that produced it.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReplayPassRecord {
+    pub pass_index: usize,
+    pub stage: ReplayPassStage,
+    pub worker_idx: usize,
+    pub dp_rank: u32,
+    pub pass_start_ms: f64,
+    pub pass_end_ms: f64,
+    pub prefill_time_ms: f64,
+    pub decode_time_ms: f64,
+    pub wall_time_ms: f64,
+    pub prefill_batch_size: u32,
+    pub prefill_token_count: u64,
+    pub prefill_kv_tokens: u64,
+    /// Decode requests reported by the FPM snapshot. The first token pass may
+    /// report zero here because the scheduler classifies it as prefill work.
+    pub scheduled_decode_batch_size: u32,
+    /// Requests for which the pass actually ran/emitted decode output.
+    pub decode_batch_size: u32,
+    pub decode_output_request_count: usize,
+    pub decode_kv_tokens: u64,
+    pub queued_prefill_count: u32,
+    pub queued_prefill_tokens: u64,
+    pub queued_decode_count: u32,
+    pub queued_decode_kv_tokens: u64,
+    pub output_token_count: usize,
+    pub completed_request_count: usize,
+    pub admission_count: usize,
 }
 
 impl TraceSimulationReport {
@@ -182,6 +231,11 @@ impl Display for TraceSimulationReport {
             self.processed_output_tokens_per_s()
         )?;
         writeln!(f, "  mean_ttft_ms: {:.6}", self.latency.ttft.mean_ms)?;
+        writeln!(
+            f,
+            "  mean_ttft_prefill_only_ms: {:.6}",
+            self.latency.ttft_prefill_only.mean_ms
+        )?;
         writeln!(f, "  mean_e2e_latency_ms: {:.6}", self.latency.e2e.mean_ms)?;
         writeln!(
             f,
@@ -274,6 +328,11 @@ impl Serialize for TraceSimulationReport {
             &self.first_admission_prefix_cache_reused_ratio,
         )?;
         serialize_distribution(&mut map, "ttft", &self.latency.ttft)?;
+        serialize_distribution(
+            &mut map,
+            "ttft_prefill_only",
+            &self.latency.ttft_prefill_only,
+        )?;
         serialize_distribution(&mut map, "ttst", &self.latency.ttst)?;
         serialize_distribution(&mut map, "tpot", &self.latency.tpot)?;
         serialize_distribution(&mut map, "itl", &self.latency.itl.distribution)?;
@@ -332,6 +391,9 @@ where
 struct TraceRequestStats {
     arrival_time_ms: f64,
     first_admit_ms: Option<f64>,
+    /// Sim time at which the prompt finished computing on the observed engine —
+    /// where a real engine would sample the first token. See `on_prefill_complete`.
+    prefill_done_ms: Option<f64>,
     terminal_time_ms: Option<f64>,
     terminal_status: Option<ReplayTerminalStatus>,
     token_timeline: TokenTimeline,
@@ -552,6 +614,9 @@ pub struct PerRequestRecord {
     pub first_token_ms: Option<f64>,
     pub last_token_ms: Option<f64>,
     pub ttft_ms: Option<f64>,
+    pub prefill_done_ms: Option<f64>,
+    /// TTFT to the end of prefill compute; see `TraceLatencyStats::ttft_prefill_only`.
+    pub ttft_prefill_only_ms: Option<f64>,
     pub ttst_ms: Option<f64>,
     pub e2e_latency_ms: Option<f64>,
     /// Inter-token latency for this request, in milliseconds. Matches
@@ -666,6 +731,10 @@ pub(crate) struct TraceCollector {
     /// Default `false` to skip the ~100ms terminal pass + ~30MB allocation
     /// when the caller doesn't need per-request granularity.
     capture_per_request: bool,
+    /// Pass capture is enabled with per-request capture so the two JSONL
+    /// exports describe the same replay execution without a second run.
+    capture_per_pass: bool,
+    pass_records: Vec<ReplayPassRecord>,
     /// SLA thresholds for goodput classification. All-`None` by default, in
     /// which case `finish()` leaves `TraceSimulationReport::goodput` as `None`.
     sla: SlaThresholds,
@@ -776,6 +845,11 @@ impl TraceCollector {
     /// default; the runtimes flip it on when the caller asks for JSONL output.
     pub(crate) fn set_capture_per_request(&mut self, value: bool) {
         self.capture_per_request = value;
+        self.capture_per_pass = value;
+    }
+
+    pub(crate) fn capture_per_pass(&self) -> bool {
+        self.capture_per_pass
     }
 
     /// Set the SLA thresholds used to classify goodput in `finish()`. With no
@@ -825,6 +899,7 @@ impl TraceCollector {
             TraceRequestStats {
                 arrival_time_ms,
                 first_admit_ms: None,
+                prefill_done_ms: None,
                 terminal_time_ms: None,
                 terminal_status: None,
                 token_timeline: TokenTimeline::default(),
@@ -895,6 +970,70 @@ impl TraceCollector {
             }
             stats.reused_input_tokens = stats.reused_input_tokens.max(reused_input_tokens);
         }
+    }
+
+    /// Record when `uuid` finished computing its prompt on the engine this
+    /// collector observes, i.e. the point a real engine samples the first token.
+    /// Schedulers call this on every pass a request is ready to decode; set-once
+    /// keeps the pass that produces its first token. In disaggregated replay the
+    /// prefill stage is hidden, so this lands after the handoff instead.
+    pub(crate) fn on_prefill_complete(&mut self, uuid: Uuid, prefill_done_ms: f64) {
+        if let Some(stats) = self.requests.get_mut(&uuid)
+            && stats.prefill_done_ms.is_none()
+        {
+            stats.prefill_done_ms = Some(prefill_done_ms);
+        }
+    }
+
+    pub(crate) fn on_pass(
+        &mut self,
+        stage: ReplayPassStage,
+        worker_idx: usize,
+        dp_rank: u32,
+        pass_start_ms: f64,
+        pass_end_ms: f64,
+        prefill_time_ms: f64,
+        decode_time_ms: f64,
+        fpm: Option<&ForwardPassSnapshot>,
+        output_token_count: usize,
+        output_request_count: usize,
+        completed_request_count: usize,
+        admission_count: usize,
+    ) {
+        if !self.capture_per_pass {
+            return;
+        }
+        let snapshot = fpm.cloned().unwrap_or_default();
+        let decode_batch_size = if decode_time_ms > 0.0 && output_request_count > 0 {
+            output_request_count as u32
+        } else {
+            snapshot.num_decode_requests
+        };
+        self.pass_records.push(ReplayPassRecord {
+            pass_index: self.pass_records.len(),
+            stage,
+            worker_idx,
+            dp_rank,
+            pass_start_ms,
+            pass_end_ms,
+            prefill_time_ms,
+            decode_time_ms,
+            wall_time_ms: (pass_end_ms - pass_start_ms).max(0.0),
+            prefill_batch_size: snapshot.num_prefill_requests,
+            prefill_token_count: snapshot.sum_prefill_tokens,
+            prefill_kv_tokens: snapshot.sum_prefill_kv_tokens,
+            scheduled_decode_batch_size: snapshot.num_decode_requests,
+            decode_batch_size,
+            decode_output_request_count: output_request_count,
+            decode_kv_tokens: snapshot.sum_decode_kv_tokens,
+            queued_prefill_count: snapshot.num_queued_prefill,
+            queued_prefill_tokens: snapshot.sum_queued_prefill_tokens,
+            queued_decode_count: snapshot.num_queued_decode,
+            queued_decode_kv_tokens: snapshot.sum_queued_decode_kv_tokens,
+            output_token_count,
+            completed_request_count,
+            admission_count,
+        });
     }
 
     pub(crate) fn on_prefill_admit(
@@ -1174,6 +1313,11 @@ impl TraceCollector {
     }
 
     pub(crate) fn finish(mut self) -> TraceSimulationReport {
+        let pass_records = if self.capture_per_pass {
+            std::mem::take(&mut self.pass_records)
+        } else {
+            Vec::new()
+        };
         let Self {
             requests,
             itl_distribution,
@@ -1210,6 +1354,7 @@ impl TraceCollector {
         let requests = self.requests;
         let request_count = requests.len();
         let mut ttfts = Vec::with_capacity(request_count);
+        let mut ttft_prefill_onlys = Vec::with_capacity(request_count);
         let mut ttsts = Vec::with_capacity(request_count);
         let mut tpots = Vec::with_capacity(request_count);
         let mut e2e_latencies = Vec::with_capacity(request_count);
@@ -1256,6 +1401,9 @@ impl TraceCollector {
             let e2e_ms = (last_token_ms - stats.arrival_time_ms).max(0.0);
             ttfts.push(ttft_ms);
             e2e_latencies.push(e2e_ms);
+            if let Some(prefill_done_ms) = stats.prefill_done_ms {
+                ttft_prefill_onlys.push((prefill_done_ms - stats.arrival_time_ms).max(0.0));
+            }
 
             // Goodput classification (aiperf avg-ITL; see SlaThresholds::is_good).
             if sla.is_set() && sla.is_good(ttft_ms, e2e_ms, output_length) {
@@ -1326,6 +1474,7 @@ impl TraceCollector {
             },
             latency: TraceLatencyStats {
                 ttft: build_distribution_stats(ttfts),
+                ttft_prefill_only: build_distribution_stats(ttft_prefill_onlys),
                 ttst: build_distribution_stats(ttsts),
                 tpot: build_distribution_stats(tpots),
                 itl: TraceInterTokenLatencyStats {
@@ -1337,6 +1486,7 @@ impl TraceCollector {
             },
             goodput,
             per_request,
+            per_pass: pass_records,
         }
     }
 
@@ -1370,6 +1520,10 @@ impl TraceCollector {
                 first_token_ms,
                 last_token_ms,
                 ttft_ms: first_token_ms.map(|time| (time - stats.arrival_time_ms).max(0.0)),
+                prefill_done_ms: stats.prefill_done_ms,
+                ttft_prefill_only_ms: stats
+                    .prefill_done_ms
+                    .map(|time| (time - stats.arrival_time_ms).max(0.0)),
                 ttst_ms: stats.ttst_ms(),
                 e2e_latency_ms: last_token_ms.map(|time| (time - stats.arrival_time_ms).max(0.0)),
                 itl_ms: stats.mean_tpot_ms(),
@@ -1697,6 +1851,72 @@ mod tests {
         assert_eq!(report.request_counts.total_input_tokens, 0);
         assert_eq!(report.request_counts.total_output_tokens, 0);
         assert_eq!(report.throughput.duration_ms, 0.0);
+    }
+
+    /// `on_prefill_complete` is set-once, so a request that keeps decoding for
+    /// many more passes still reports the pass that produced its first token.
+    #[test]
+    fn prefill_only_ttft_stops_at_prefill_end() {
+        let mut collector = TraceCollector::default();
+        collector.set_capture_per_request(true);
+        let uuid = Uuid::from_u128(102);
+        collector.on_arrival(uuid, 10.0, 32, 2);
+        collector.on_admit(uuid, 12.0, 0);
+        collector.on_prefill_complete(uuid, 20.0);
+        collector.on_token(uuid, 25.0);
+        collector.on_prefill_complete(uuid, 25.0);
+        collector.on_token(uuid, 30.0);
+        collector.on_terminal(uuid, 30.0, ReplayTerminalStatus::Completed);
+
+        let report = collector.finish();
+
+        assert_eq!(report.latency.ttft.mean_ms, 15.0);
+        assert_eq!(report.latency.ttft_prefill_only.mean_ms, 10.0);
+        let rec = &report.per_request[0];
+        assert_eq!(rec.prefill_done_ms, Some(20.0));
+        assert_eq!(rec.ttft_prefill_only_ms, Some(10.0));
+        assert_eq!(rec.ttft_ms, Some(15.0));
+    }
+
+    #[test]
+    fn pass_capture_preserves_batch_and_timing_fields() {
+        let mut collector = TraceCollector::default();
+        collector.set_capture_per_request(true);
+        collector.on_pass(
+            ReplayPassStage::Aggregated,
+            0,
+            0,
+            10.0,
+            23.5,
+            12.25,
+            1.25,
+            Some(&ForwardPassSnapshot {
+                num_prefill_requests: 4,
+                sum_prefill_tokens: 8192,
+                sum_prefill_kv_tokens: 0,
+                num_decode_requests: 4,
+                sum_decode_kv_tokens: 8192,
+                num_queued_prefill: 3,
+                sum_queued_prefill_tokens: 6144,
+                ..Default::default()
+            }),
+            4,
+            4,
+            0,
+            4,
+        );
+
+        let report = collector.finish();
+        assert_eq!(report.per_pass.len(), 1);
+        let pass = &report.per_pass[0];
+        assert_eq!(pass.pass_index, 0);
+        assert_eq!(pass.prefill_batch_size, 4);
+        assert_eq!(pass.prefill_token_count, 8192);
+        assert_eq!(pass.decode_batch_size, 4);
+        assert_eq!(pass.queued_prefill_count, 3);
+        assert_eq!(pass.prefill_time_ms, 12.25);
+        assert_eq!(pass.decode_time_ms, 1.25);
+        assert_eq!(pass.wall_time_ms, 13.5);
     }
 
     #[test]

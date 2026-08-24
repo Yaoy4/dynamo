@@ -462,6 +462,10 @@ fn validate_report_finite(report: &TraceSimulationReport) -> Result<()> {
     }
 
     validate_distribution("/summary/ttft", &report.latency.ttft)?;
+    validate_distribution(
+        "/summary/ttft_prefill_only",
+        &report.latency.ttft_prefill_only,
+    )?;
     validate_distribution("/summary/ttst", &report.latency.ttst)?;
     validate_distribution("/summary/tpot", &report.latency.tpot)?;
     validate_distribution("/summary/itl", &report.latency.itl.distribution)?;
@@ -513,6 +517,8 @@ fn validate_per_request_finite(record: &PerRequestRecord) -> Result<()> {
         ("first_token_ms", record.first_token_ms),
         ("last_token_ms", record.last_token_ms),
         ("ttft_ms", record.ttft_ms),
+        ("prefill_done_ms", record.prefill_done_ms),
+        ("ttft_prefill_only_ms", record.ttft_prefill_only_ms),
         ("ttst_ms", record.ttst_ms),
         ("e2e_latency_ms", record.e2e_latency_ms),
         ("itl_ms", record.itl_ms),

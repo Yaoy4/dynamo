@@ -120,6 +120,8 @@ fn pass() -> EnginePassResult {
     let request_id = Uuid::from_u128(1);
     EnginePassResult {
         end_ms: 1.0,
+        prefill_time_ms: 0.0,
+        decode_time_ms: 0.0,
         completed_requests: 1,
         output_signals: vec![OutputSignal {
             uuid: request_id,

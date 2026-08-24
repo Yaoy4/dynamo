@@ -2043,7 +2043,10 @@ where
     fn drive_prefill_workers(&mut self) -> Result<bool> {
         let mut changed = false;
         loop {
-            let effects = self.prefill_engine.drive_ready(self.now_ms, None)?;
+            let capture_passes = self.collector.capture_per_pass();
+            let effects = self
+                .prefill_engine
+                .drive_ready(self.now_ms, capture_passes.then_some(&mut self.collector))?;
             attach_pressure_references(&mut self.collector);
             if effects.is_empty() {
                 return Ok(changed);

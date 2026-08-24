@@ -88,6 +88,8 @@ pub struct AicPerfConfig {
     aic_backend: String,
     aic_system: String,
     aic_backend_version: Option<String>,
+    aic_database_mode: Option<String>,
+    aic_xe_compute_config: Option<String>,
     aic_tp_size: usize,
     aic_model_path: String,
     aic_moe_tp_size: Option<usize>,
@@ -113,6 +115,14 @@ impl AicPerfConfig {
 
     pub(crate) fn backend_version(&self) -> Option<&str> {
         self.aic_backend_version.as_deref()
+    }
+
+    pub(crate) fn database_mode(&self) -> Option<&str> {
+        self.aic_database_mode.as_deref()
+    }
+
+    pub(crate) fn xe_compute_config(&self) -> Option<&str> {
+        self.aic_xe_compute_config.as_deref()
     }
 
     pub(crate) fn tp_size(&self) -> usize {
@@ -167,7 +177,7 @@ impl AicPerfConfig {
 #[pymethods]
 impl AicPerfConfig {
     #[new]
-    #[pyo3(signature = (aic_backend, aic_system, aic_model_path, aic_tp_size=1, aic_backend_version=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None))]
+    #[pyo3(signature = (aic_backend, aic_system, aic_model_path, aic_tp_size=1, aic_backend_version=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, aic_database_mode=None, aic_xe_compute_config=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         aic_backend: String,
@@ -185,6 +195,8 @@ impl AicPerfConfig {
         aic_fmha_dtype: Option<String>,
         aic_kv_cache_dtype: Option<String>,
         aic_comm_dtype: Option<String>,
+        aic_database_mode: Option<String>,
+        aic_xe_compute_config: Option<String>,
     ) -> PyResult<Self> {
         if aic_backend.is_empty() {
             return Err(PyValueError::new_err("aic_backend must be non-empty"));
@@ -220,6 +232,8 @@ impl AicPerfConfig {
             aic_backend,
             aic_system,
             aic_backend_version,
+            aic_database_mode,
+            aic_xe_compute_config,
             aic_tp_size,
             aic_model_path,
             aic_moe_tp_size,
@@ -856,6 +870,8 @@ async fn select_engine(
                             config.comm_dtype(),
                             config.nextn(),
                             config.nextn_accept_rates(),
+                            config.database_mode(),
+                            config.xe_compute_config(),
                         )
                     })
                 })
@@ -904,6 +920,8 @@ async fn select_engine(
                 let comm_dtype = mocker_args.aic_comm_dtype.as_deref();
                 let nextn = mocker_args.aic_nextn;
                 let undiscounted_accept_rates = mocker_args.undiscounted_aic_accept_rates();
+                let database_mode = mocker_args.aic_database_mode.as_deref();
+                let xe_compute_config = mocker_args.aic_xe_compute_config.as_deref();
                 match Python::with_gil(|py| {
                     create_aic_callback(
                         py,
@@ -922,6 +940,8 @@ async fn select_engine(
                         comm_dtype,
                         nextn,
                         undiscounted_accept_rates.as_deref(),
+                        database_mode,
+                        xe_compute_config,
                     )
                 }) {
                     Ok(callback) => {

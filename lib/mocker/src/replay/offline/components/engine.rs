@@ -17,7 +17,7 @@ use super::super::state::OfflineWorkerState;
 use super::ObservedOffloadEffects;
 use super::{EngineEffects, EnginePassMode, ObservedCommandEffects, ReplayEngineObservation};
 use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs};
-use crate::replay::TraceCollector;
+use crate::replay::{ReplayPassStage, TraceCollector};
 use crate::scheduler::{EnginePassResult, RouterEventVisibility, SchedulerCommand};
 
 fn fpm_has_scheduled_work(snapshot: &ForwardPassSnapshot) -> bool {
@@ -29,6 +29,14 @@ fn evidence_pool(stage: SimulationWorkerStage) -> WorkerPool {
         SimulationWorkerStage::Aggregated => WorkerPool::Agg,
         SimulationWorkerStage::Prefill => WorkerPool::Prefill,
         SimulationWorkerStage::Decode => WorkerPool::Decode,
+    }
+}
+
+fn replay_pass_stage(stage: SimulationWorkerStage) -> ReplayPassStage {
+    match stage {
+        SimulationWorkerStage::Aggregated => ReplayPassStage::Aggregated,
+        SimulationWorkerStage::Prefill => ReplayPassStage::Prefill,
+        SimulationWorkerStage::Decode => ReplayPassStage::Decode,
     }
 }
 
@@ -599,16 +607,44 @@ where
         workers: &mut [Option<OfflineWorkerState>],
         stage: SimulationWorkerStage,
         rank_id: usize,
+        dp_rank: u32,
         boundary: PassBoundary,
         mut executed: EnginePassResult,
-        align_collector: Option<&mut TraceCollector>,
+        mut pass_collector: Option<&mut TraceCollector>,
+        align_token_times: bool,
         effects: &mut EngineEffects<Observation::Batch>,
     ) {
         if let Some(fpm) = executed.fpm.as_mut() {
             fpm.wall_time_secs = boundary.wall_time_secs();
         }
-        if let Some(collector) = align_collector {
-            collector.align_pass_token_times(&executed.output_signals, boundary.end_ms);
+        if let Some(collector) = pass_collector.as_deref_mut() {
+            collector.on_pass(
+                replay_pass_stage(stage),
+                rank_id,
+                dp_rank,
+                boundary.start_ms,
+                boundary.end_ms,
+                executed.prefill_time_ms,
+                executed.decode_time_ms,
+                executed.fpm.as_ref(),
+                executed
+                    .output_signals
+                    .iter()
+                    .filter(|signal| signal.token_id.is_some())
+                    .count(),
+                executed
+                    .output_signals
+                    .iter()
+                    .filter(|signal| signal.token_id.is_some())
+                    .map(|signal| signal.uuid)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len(),
+                executed.completed_requests,
+                executed.admissions.len(),
+            );
+            if align_token_times {
+                collector.align_pass_token_times(&executed.output_signals, boundary.end_ms);
+            }
         }
 
         let admitted_requests = !executed.admissions.is_empty();
@@ -733,26 +769,20 @@ where
                     },
                 )?;
                 let group_end_ms = executed.end_ms.max(now_ms);
-                let align_collector = if self.pass_mode == EnginePassMode::Visible {
-                    Some(
-                        collector
-                            .as_deref_mut()
-                            .expect("visible pass collector checked before execution"),
-                    )
-                } else {
-                    None
-                };
+                let pass_collector = collector.as_deref_mut();
                 Self::lower_executed_pass(
                     &mut self.workers,
                     self.stage,
                     rank_id,
+                    dp_rank,
                     PassBoundary {
                         start_ms: now_ms,
                         end_ms: group_end_ms,
                         completion_capacity: 1,
                     },
                     executed,
-                    align_collector,
+                    pass_collector,
+                    self.pass_mode == EnginePassMode::Visible,
                     &mut effects,
                 );
                 group_end_ms
@@ -831,22 +861,18 @@ where
                         continue;
                     };
 
-                    let align_collector = if self.pass_mode == EnginePassMode::Visible {
-                        Some(
-                            collector
-                                .as_deref_mut()
-                                .expect("visible pass collector checked before execution"),
-                        )
-                    } else {
-                        None
-                    };
+                    let (_, dp_rank) =
+                        Self::required_worker(&self.workers, rank_id).rank_identity();
+                    let pass_collector = collector.as_deref_mut();
                     Self::lower_executed_pass(
                         &mut self.workers,
                         self.stage,
                         rank_id,
+                        dp_rank,
                         boundary,
                         executed,
-                        align_collector,
+                        pass_collector,
+                        self.pass_mode == EnginePassMode::Visible,
                         &mut effects,
                     );
                 }

@@ -1315,6 +1315,58 @@ mod core_behavior {
         assert_eq!(first.first_token_ms, second.first_token_ms);
     }
 
+    /// An aggregated worker samples the first token in the decode step that
+    /// follows prefill, so the token lands one decode step after prefill ends.
+    #[test]
+    fn test_prefill_done_precedes_first_token_by_the_decode_step() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(16)
+            .max_num_batched_tokens(Some(8))
+            .max_num_seqs(Some(1))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let uuid = Uuid::from_u128(303);
+        core.receive(DirectRequest {
+            tokens: vec![1; 4],
+            max_output_tokens: 2,
+            output_token_ids: None,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        collector.set_capture_per_request(true);
+        collector.on_arrival(uuid, 0.0, 4, 2);
+        let first_pass = core.execute_pass(&mut collector, 0.0);
+        let second_pass = core.execute_pass(&mut collector, first_pass.end_ms);
+        collector.on_terminal(
+            uuid,
+            second_pass.end_ms,
+            crate::replay::ReplayTerminalStatus::Completed,
+        );
+
+        let report = collector.finish();
+        let record = &report.per_request[0];
+        let prefill_done_ms = record.prefill_done_ms.expect("prefill boundary recorded");
+
+        assert_eq!(record.first_token_ms, Some(first_pass.end_ms));
+        assert!(
+            prefill_done_ms > 0.0 && prefill_done_ms < first_pass.end_ms,
+            "prefill must end after arrival and before the first token: \
+             prefill_done={prefill_done_ms}, first_token={}",
+            first_pass.end_ms
+        );
+        assert_eq!(record.ttft_prefill_only_ms, Some(prefill_done_ms));
+        assert_eq!(record.ttft_ms, Some(first_pass.end_ms));
+    }
+
     #[test]
     fn test_prefill_completion_emits_handoff_delay() {
         let args = MockEngineArgs::builder()

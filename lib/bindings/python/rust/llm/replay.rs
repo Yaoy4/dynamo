@@ -39,6 +39,7 @@ struct OfflineReplayCoverage {
     capture_per_request: bool,
     capture_planner_details: bool,
     per_request_records: usize,
+    per_pass_records: usize,
 }
 
 #[pyclass(name = "_OfflineReplayResult")]
@@ -65,6 +66,7 @@ impl OfflineReplayResult {
             capture_per_request,
             capture_planner_details,
             per_request_records: report.per_request.len(),
+            per_pass_records: report.per_pass.len(),
         };
         Self {
             report,
@@ -283,7 +285,7 @@ impl MockEngineArgs {
 #[pymethods]
 impl MockEngineArgs {
     #[new]
-    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=42, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, response_replay_trace_path=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, num_g2_blocks=None, num_g3_blocks=None, offload_batch_size=None, bandwidth_g1_to_g2_gbps=None, bandwidth_g2_to_g1_gbps=None, bandwidth_g2_to_g3_gbps=None, bandwidth_g3_to_g2_gbps=None, enable_g4_storage=false, bandwidth_g2_to_g4_gbps=None, bandwidth_g4_to_g2_gbps=None, max_model_len=None, g1_backend=None))]
+    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_database_mode=None, aic_xe_compute_config=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=42, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, response_replay_trace_path=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, num_g2_blocks=None, num_g3_blocks=None, offload_batch_size=None, bandwidth_g1_to_g2_gbps=None, bandwidth_g2_to_g1_gbps=None, bandwidth_g2_to_g3_gbps=None, bandwidth_g3_to_g2_gbps=None, enable_g4_storage=false, bandwidth_g2_to_g4_gbps=None, bandwidth_g4_to_g2_gbps=None, max_model_len=None, g1_backend=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         engine_type: &str,
@@ -302,6 +304,8 @@ impl MockEngineArgs {
         aic_backend: Option<String>,
         aic_system: Option<String>,
         aic_backend_version: Option<String>,
+        aic_database_mode: Option<String>,
+        aic_xe_compute_config: Option<String>,
         aic_tp_size: Option<usize>,
         aic_model_path: Option<String>,
         aic_moe_tp_size: Option<usize>,
@@ -377,6 +381,8 @@ impl MockEngineArgs {
             .aic_backend(aic_backend)
             .aic_system(aic_system)
             .aic_backend_version(aic_backend_version)
+            .aic_database_mode(aic_database_mode)
+            .aic_xe_compute_config(aic_xe_compute_config)
             .aic_tp_size(aic_tp_size)
             .aic_model_path(aic_model_path)
             .aic_moe_tp_size(aic_moe_tp_size)
@@ -647,6 +653,26 @@ impl MockEngineArgs {
     }
 
     #[getter]
+    fn aic_database_mode(&self) -> Option<String> {
+        self.inner.aic_database_mode.clone()
+    }
+
+    #[setter]
+    fn set_aic_database_mode(&mut self, value: Option<String>) {
+        self.inner.aic_database_mode = value;
+    }
+
+    #[getter]
+    fn aic_xe_compute_config(&self) -> Option<String> {
+        self.inner.aic_xe_compute_config.clone()
+    }
+
+    #[setter]
+    fn set_aic_xe_compute_config(&mut self, value: Option<String>) {
+        self.inner.aic_xe_compute_config = value;
+    }
+
+    #[getter]
     fn aic_tp_size(&self) -> Option<usize> {
         self.inner.aic_tp_size
     }
@@ -860,7 +886,7 @@ impl MockEngineArgs {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=None, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_prefix_caching=None, worker_type=None))]
+    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_database_mode=None, aic_xe_compute_config=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=None, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_prefix_caching=None, worker_type=None))]
     fn with_overrides(
         &self,
         bootstrap_port: Option<u16>,
@@ -871,6 +897,8 @@ impl MockEngineArgs {
         aic_backend: Option<String>,
         aic_system: Option<String>,
         aic_backend_version: Option<String>,
+        aic_database_mode: Option<String>,
+        aic_xe_compute_config: Option<String>,
         aic_tp_size: Option<usize>,
         aic_model_path: Option<String>,
         aic_moe_tp_size: Option<usize>,
@@ -916,6 +944,12 @@ impl MockEngineArgs {
         }
         if let Some(version) = aic_backend_version {
             inner.aic_backend_version = Some(version);
+        }
+        if let Some(mode) = aic_database_mode {
+            inner.aic_database_mode = Some(mode);
+        }
+        if let Some(config) = aic_xe_compute_config {
+            inner.aic_xe_compute_config = Some(config);
         }
         if let Some(tp_size) = aic_tp_size {
             inner.aic_tp_size = Some(tp_size);
@@ -984,7 +1018,7 @@ impl MockEngineArgs {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None))]
+#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, per_pass_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -1006,6 +1040,7 @@ pub fn run_mocker_trace_replay(
     trace_shared_prefix_ratio: f64,
     trace_num_prefix_groups: usize,
     report_jsonl_path: Option<PathBuf>,
+    per_pass_jsonl_path: Option<PathBuf>,
     max_sim_time_ms: Option<f64>,
     model_name: Option<String>,
     sla_ttft_ms: Option<f64>,
@@ -1018,6 +1053,11 @@ pub fn run_mocker_trace_replay(
     if capture_per_request && replay_mode != "offline" {
         return Err(PyValueError::new_err(
             "capture_per_request only supports replay_mode='offline'",
+        ));
+    }
+    if per_pass_jsonl_path.is_some() && replay_mode != "offline" {
+        return Err(PyValueError::new_err(
+            "per_pass_jsonl_path only supports replay_mode='offline'",
         ));
     }
     let args_selection = load_replay_args_selection(
@@ -1047,9 +1087,12 @@ pub fn run_mocker_trace_replay(
         ));
     }
     let jsonl_path_for_emit = report_jsonl_path.clone();
+    let pass_jsonl_path_for_emit = per_pass_jsonl_path.clone();
     let capture_planner_details = scaling_policy.is_some() && capture_planner_details;
     let capture_options = dynamo_mocker::replay::ReplayCaptureOptions {
-        capture_per_request: capture_per_request || report_jsonl_path.is_some(),
+        capture_per_request: capture_per_request
+            || report_jsonl_path.is_some()
+            || per_pass_jsonl_path.is_some(),
         capture_planner_details,
         ..Default::default()
     };
@@ -1240,6 +1283,10 @@ pub fn run_mocker_trace_replay(
     // JSON object (matching AIPerf's profile_export.jsonl convention).
     if let Some(path) = jsonl_path_for_emit.as_ref() {
         py.allow_threads(|| write_per_request_jsonl(path, &report.per_request))
+            .map_err(to_pyerr)?;
+    }
+    if let Some(path) = pass_jsonl_path_for_emit.as_ref() {
+        py.allow_threads(|| write_per_pass_jsonl(path, &report.per_pass))
             .map_err(to_pyerr)?;
     }
     if is_offline {
@@ -1435,8 +1482,31 @@ fn write_per_request_jsonl(
     Ok(())
 }
 
+/// Write scheduler-pass records to a JSONL file. One JSON object per pass,
+/// preserving dynamic batch sizes and the modelled prefill/decode durations.
+fn write_per_pass_jsonl(
+    path: &std::path::Path,
+    records: &[dynamo_mocker::replay::ReplayPassRecord],
+) -> anyhow::Result<()> {
+    use std::io::{BufWriter, Write};
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    for record in records {
+        let line = serde_json::to_string(record)?;
+        writer.write_all(line.as_bytes())?;
+        writer.write_all(b"\n")?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
 #[pyfunction]
-#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None))]
+#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, per_pass_jsonl_path=None, scaling_policy=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_synthetic_trace_replay(
     py: Python<'_>,
@@ -1468,11 +1538,17 @@ pub fn run_mocker_synthetic_trace_replay(
     sla_e2e_ms: Option<f64>,
     capture_per_request: bool,
     capture_planner_details: bool,
+    per_pass_jsonl_path: Option<PathBuf>,
     scaling_policy: Option<Py<PyAny>>,
 ) -> PyResult<PyObject> {
     if capture_per_request && replay_mode != "offline" {
         return Err(PyValueError::new_err(
             "capture_per_request only supports replay_mode='offline'",
+        ));
+    }
+    if per_pass_jsonl_path.is_some() && replay_mode != "offline" {
+        return Err(PyValueError::new_err(
+            "per_pass_jsonl_path only supports replay_mode='offline'",
         ));
     }
     if scaling_policy.is_some() && replay_mode != "offline" {
@@ -1507,9 +1583,10 @@ pub fn run_mocker_synthetic_trace_replay(
     let router_config = load_replay_router_config(router_config, model_name)?;
     let replay_mode = replay_mode.to_owned();
     let is_offline = replay_mode == "offline";
+    let pass_jsonl_path_for_emit = per_pass_jsonl_path.clone();
     let capture_planner_details = scaling_policy.is_some() && capture_planner_details;
     let capture_options = dynamo_mocker::replay::ReplayCaptureOptions {
-        capture_per_request,
+        capture_per_request: capture_per_request || per_pass_jsonl_path.is_some(),
         capture_planner_details,
         ..Default::default()
     };
@@ -1770,6 +1847,10 @@ pub fn run_mocker_synthetic_trace_replay(
         });
         (report.map_err(to_pyerr)?, evidence)
     };
+    if let Some(path) = pass_jsonl_path_for_emit.as_ref() {
+        py.allow_threads(|| write_per_pass_jsonl(path, &report.per_pass))
+            .map_err(to_pyerr)?;
+    }
     if is_offline {
         return Py::new(
             py,
@@ -2036,6 +2117,8 @@ fn materialize_replay_mocker_args(
         let comm_dtype = args.aic_comm_dtype.clone();
         let nextn = args.aic_nextn;
         let undiscounted_accept_rates = args.undiscounted_aic_accept_rates();
+        let database_mode = args.aic_database_mode.clone();
+        let xe_compute_config = args.aic_xe_compute_config.clone();
         // AIC-backed config may intentionally omit num_gpu_blocks. Estimate it
         // here, after candidate TP/backend/model overrides have been applied.
         let num_gpu_blocks_explicit = extra_args.num_gpu_blocks_explicit();
@@ -2065,6 +2148,8 @@ fn materialize_replay_mocker_args(
                 fmha_dtype.as_deref(),
                 kv_cache_dtype.as_deref(),
                 comm_dtype.as_deref(),
+                database_mode.as_deref(),
+                xe_compute_config.as_deref(),
             )
             .map_err(|error| {
                 PyException::new_err(format!(
@@ -2096,6 +2181,8 @@ fn materialize_replay_mocker_args(
             comm_dtype.as_deref(),
             nextn,
             undiscounted_accept_rates.as_deref(),
+            database_mode.as_deref(),
+            xe_compute_config.as_deref(),
         )
         .map_err(|e| {
             PyException::new_err(format!(
@@ -2254,6 +2341,8 @@ fn load_replay_prefill_load_estimator<'a>(
         aic_perf_config.comm_dtype(),
         aic_perf_config.nextn(),
         aic_perf_config.nextn_accept_rates(),
+        aic_perf_config.database_mode(),
+        aic_perf_config.xe_compute_config(),
     )?;
     Ok((Some(estimator), Some(resolved_aic_perf_config)))
 }

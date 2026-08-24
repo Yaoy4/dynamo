@@ -1885,6 +1885,8 @@ impl KvRouter {
                         config.comm_dtype(),
                         config.nextn(),
                         config.nextn_accept_rates(),
+                        config.database_mode(),
+                        config.xe_compute_config(),
                     )
                 })
             })

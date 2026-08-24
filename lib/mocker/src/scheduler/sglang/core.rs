@@ -700,6 +700,11 @@ impl SglangCore {
             .collect();
 
         let decode_start_ms = now_ms + prefill_time.as_secs_f64() * 1000.0;
+        if let Some(collector) = collector.as_deref_mut() {
+            for req in self.running.iter().filter(|req| req.output_len() == 0) {
+                collector.on_prefill_complete(req.uuid, decode_start_ms);
+            }
+        }
         let mut decode = simulate_decode_step_with_sampler(
             &mut self.running,
             &mut self.kv_manager,
@@ -797,6 +802,8 @@ impl SglangCore {
         debug_assert_sglang_scheduler_state(&self.waiting, &self.running, self.config.block_size);
         Ok(EnginePassResult {
             end_ms: decode.end_ms,
+            prefill_time_ms: prefill_time.as_secs_f64() * 1000.0,
+            decode_time_ms: (decode.end_ms - decode_start_ms).max(0.0),
             completed_requests: decode
                 .output_signals
                 .iter()

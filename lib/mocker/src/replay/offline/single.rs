@@ -6,7 +6,7 @@ use super::evidence::{WorkerPool, attach_pressure_references, with_engine_eviden
 use super::progress::ReplayProgress;
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::loadgen::WorkloadDriver;
-use crate::replay::{ReplayRequestPool, ReplayTerminalStatus, TraceCollector};
+use crate::replay::{ReplayPassStage, ReplayRequestPool, ReplayTerminalStatus, TraceCollector};
 use anyhow::{Context, bail};
 use std::collections::VecDeque;
 use uuid::Uuid;
@@ -220,6 +220,28 @@ impl SingleRuntime {
                     .execute_pass(&mut self.collector, self.current_time_ms)
             })?;
         attach_pressure_references(&mut self.collector);
+        self.collector.on_pass(
+            ReplayPassStage::Aggregated,
+            0,
+            0,
+            pass_start_ms,
+            pass.end_ms,
+            pass.prefill_time_ms,
+            pass.decode_time_ms,
+            pass.fpm.as_ref(),
+            pass.output_signals
+                .iter()
+                .filter(|signal| signal.token_id.is_some())
+                .count(),
+            pass.output_signals
+                .iter()
+                .filter(|signal| signal.token_id.is_some())
+                .map(|signal| signal.uuid)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            pass.completed_requests,
+            pass.admissions.len(),
+        );
         for admission in &pass.admissions {
             self.collector.on_pool_admission(
                 admission.uuid,

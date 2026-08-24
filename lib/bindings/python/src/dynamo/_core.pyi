@@ -1716,6 +1716,8 @@ class AicPerfConfig:
         aic_fmha_dtype: Optional[str] = None,
         aic_kv_cache_dtype: Optional[str] = None,
         aic_comm_dtype: Optional[str] = None,
+        aic_database_mode: Optional[str] = None,
+        aic_xe_compute_config: Optional[str] = None,
     ) -> None:
         ...
 
@@ -1897,6 +1899,8 @@ class MockEngineArgs:
         aic_backend: Optional[str] = None,
         aic_system: Optional[str] = None,
         aic_backend_version: Optional[str] = None,
+        aic_database_mode: Optional[str] = None,
+        aic_xe_compute_config: Optional[str] = None,
         aic_tp_size: Optional[int] = None,
         aic_model_path: Optional[str] = None,
         aic_moe_tp_size: Optional[int] = None,
@@ -2045,6 +2049,18 @@ class MockEngineArgs:
     def aic_backend_version(self, value: Optional[str]) -> None: ...
 
     @property
+    def aic_database_mode(self) -> Optional[str]: ...
+
+    @aic_database_mode.setter
+    def aic_database_mode(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_xe_compute_config(self) -> Optional[str]: ...
+
+    @aic_xe_compute_config.setter
+    def aic_xe_compute_config(self, value: Optional[str]) -> None: ...
+
+    @property
     def aic_tp_size(self) -> Optional[int]: ...
 
     @aic_tp_size.setter
@@ -2160,6 +2176,8 @@ class MockEngineArgs:
         aic_backend: Optional[str] = None,
         aic_system: Optional[str] = None,
         aic_backend_version: Optional[str] = None,
+        aic_database_mode: Optional[str] = None,
+        aic_xe_compute_config: Optional[str] = None,
         aic_tp_size: Optional[int] = None,
         aic_model_path: Optional[str] = None,
         aic_moe_tp_size: Optional[int] = None,
@@ -2449,6 +2467,7 @@ def run_mocker_trace_replay(
     trace_shared_prefix_ratio: float = 0.0,
     trace_num_prefix_groups: int = 0,
     report_jsonl_path: Optional[str | os.PathLike[str]] = None,
+    per_pass_jsonl_path: Optional[str | os.PathLike[str]] = None,
     max_sim_time_ms: Optional[float] = None,
     model_name: Optional[str] = None,
     sla_ttft_ms: Optional[float] = None,

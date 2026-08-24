@@ -33,6 +33,7 @@ class _CommonReplayOptions(TypedDict, total=False):
     planner_config: Any
     benchmark_granularity: int
     capture_per_request: bool
+    per_pass_jsonl_path: str | os.PathLike[str] | None
     capture_planner_details: bool
 
 
@@ -132,6 +133,7 @@ def run_trace_replay(
     trace_shared_prefix_ratio=0.0,
     trace_num_prefix_groups=0,
     report_jsonl_path=None,
+    per_pass_jsonl_path=None,
     max_sim_time_ms=None,
     model_name=None,
     sla_ttft_ms=None,
@@ -166,6 +168,7 @@ def run_trace_replay(
         "trace_shared_prefix_ratio": trace_shared_prefix_ratio,
         "trace_num_prefix_groups": trace_num_prefix_groups,
         "report_jsonl_path": report_jsonl_path,
+        "per_pass_jsonl_path": per_pass_jsonl_path,
         "max_sim_time_ms": max_sim_time_ms,
         "model_name": model_name,
         "sla_ttft_ms": sla_ttft_ms,
@@ -179,6 +182,8 @@ def run_trace_replay(
             "capture_per_request only supports replay_mode='offline'; "
             "use report_jsonl_path for online request records"
         )
+    if per_pass_jsonl_path is not None and replay_mode == "online":
+        raise ValueError("per_pass_jsonl_path only supports replay_mode='offline'")
     if planner_config is not None:
         # Planner replay is offline-only; reject controls the
         # planner path ignores so callers fail fast instead of silently getting an
@@ -303,6 +308,7 @@ def run_synthetic_trace_replay(
     planner_config=None,
     benchmark_granularity=8,
     capture_per_request=False,
+    per_pass_jsonl_path=None,
     capture_planner_details=True,
 ) -> ReplayReport | dict[str, Any]:
     """Run synthetic replay with the same timing boundary as trace replay."""
@@ -331,10 +337,13 @@ def run_synthetic_trace_replay(
         "sla_itl_ms": sla_itl_ms,
         "sla_e2e_ms": sla_e2e_ms,
         "capture_per_request": capture_per_request,
+        "per_pass_jsonl_path": per_pass_jsonl_path,
         "capture_planner_details": capture_planner_details,
     }
     if capture_per_request and replay_mode == "online":
         raise ValueError("capture_per_request only supports replay_mode='offline'")
+    if per_pass_jsonl_path is not None and replay_mode == "online":
+        raise ValueError("per_pass_jsonl_path only supports replay_mode='offline'")
     if planner_config is not None:
         if replay_mode != "offline":
             raise ValueError(

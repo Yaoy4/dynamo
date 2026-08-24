@@ -1670,6 +1670,8 @@ impl VllmCore {
         self.state.debug_assert_invariants();
         Ok(EnginePassResult {
             end_ms,
+            prefill_time_ms: prefill_time.as_secs_f64() * 1000.0,
+            decode_time_ms: decode_time.as_secs_f64() * 1000.0,
             completed_requests: requests_before.saturating_sub(self.state.requests.len()),
             output_signals,
             admissions,
@@ -2218,6 +2220,11 @@ impl VllmCore {
                 debug_assert!(effects.immediate.is_empty());
                 already_complete.push((uuid, handoff_delay_ms, effects.cleanup));
                 continue;
+            }
+            if request.sequence.generated_tokens() == 0
+                && let Some(collector) = collector.as_deref_mut()
+            {
+                collector.on_prefill_complete(uuid, decode_start_ms);
             }
             ready.push(uuid);
             total_length += request.sequence.len();

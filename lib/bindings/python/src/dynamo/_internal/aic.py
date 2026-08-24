@@ -27,6 +27,63 @@ DEFAULT_GPU_MEMORY_UTILIZATION = 0.9
 DEFAULT_MEM_FRACTION_STATIC = 0.88
 DEFAULT_FREE_GPU_MEMORY_FRACTION = 0.9
 
+# Perf-data provenance. SILICON reads collected grids off disk (NVIDIA parts);
+# ANALYTICAL computes every kernel at query time from a vendor analytical model
+# (Intel Xe), so there is nothing on disk to read.
+DATABASE_MODE_SILICON = "SILICON"
+DATABASE_MODE_ANALYTICAL = "ANALYTICAL"
+# The mode the SDK itself runs under while the analytical backend is patched in:
+# kernels the Xe backend does not implement must fall back to roofline formulas
+# derived from the system YAML, never to a CSV lookup that does not exist.
+_ANALYTICAL_SDK_MODE = "EMPIRICAL"
+_SUPPORTED_DATABASE_MODES = (DATABASE_MODE_SILICON, DATABASE_MODE_ANALYTICAL)
+
+
+def resolve_database_mode(database_mode: str | None) -> str:
+    """Normalize the perf-data mode; ``None`` means the historical SILICON path."""
+    if database_mode is None:
+        return DATABASE_MODE_SILICON
+    normalized = database_mode.strip().upper()
+    if not normalized:
+        return DATABASE_MODE_SILICON
+    if normalized not in _SUPPORTED_DATABASE_MODES:
+        supported = ", ".join(_SUPPORTED_DATABASE_MODES)
+        raise ValueError(
+            f"unsupported aic_database_mode {database_mode!r}; supported: {supported}"
+        )
+    return normalized
+
+
+def _activate_analytical_backend(system: str, xe_compute_config: str | None) -> None:
+    """Install the vendor analytical perf backend for the process lifetime.
+
+    The backend replaces ``PerfDatabase.query_*`` at the class level and must
+    stay installed: predictions happen long after this call returns.
+    """
+    if not xe_compute_config:
+        raise ValueError(
+            f"aic_database_mode={DATABASE_MODE_ANALYTICAL} requires aic_xe_compute_config "
+            "(e.g. 'xe5_96') so the analytical model knows which device to model"
+        )
+    try:
+        from intel_xe import analytical_session
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            f"aic_database_mode={DATABASE_MODE_ANALYTICAL} needs the 'intel_xe' package "
+            "from the Intel aiconfigurator distribution, which is not installed"
+        ) from exc
+
+    analytical_session.activate(system, xe_compute_config)
+    unsupported = analytical_session.unsupported_kernels()
+    if unsupported:
+        # These still answer, but with the NVIDIA model — silently wrong numbers.
+        logger.warning(
+            "AIC analytical backend does not implement %s; those kernels keep the "
+            "vendor-default cost model and will not reflect %s",
+            ", ".join(sorted(unsupported)),
+            system,
+        )
+
 
 def _validate_kv_capacity_backend(backend_name: str) -> None:
     if backend_name not in _KV_CAPACITY_BACKENDS:
@@ -70,7 +127,7 @@ def _resolve_quant_mode(field: str, value: str | None):
     normalized = _normalize_aic_quant_mode(value)
     if normalized is None:
         return None
-    from aiconfigurator_core.sdk import common
+    from aiconfigurator.sdk import common
 
     enum_cls = {
         "gemm": common.GEMMQuantMode,
@@ -134,21 +191,22 @@ def _pad_nextn_accept_rates(
 
 def _load_aiconfigurator():
     try:
-        from aiconfigurator_core.sdk import config
-        from aiconfigurator_core.sdk.backends.factory import get_backend
-        from aiconfigurator_core.sdk.models import get_model
-        from aiconfigurator_core.sdk.perf_database import (
+        from aiconfigurator.sdk import common, config
+        from aiconfigurator.sdk.backends.factory import get_backend
+        from aiconfigurator.sdk.models import get_model
+        from aiconfigurator.sdk.perf_database import (
             get_database,
             get_supported_databases,
         )
     except ModuleNotFoundError as exc:
-        if exc.name != "aiconfigurator_core":
+        if exc.name != "aiconfigurator":
             raise
         raise RuntimeError(
             "aiconfigurator-core is required for AIC perf modeling but is not installed"
         ) from exc
 
     return {
+        "common": common,
         "config": config,
         "get_backend": get_backend,
         "get_model": get_model,
@@ -177,12 +235,23 @@ class AicSession:
         comm_dtype: str | None = None,
         nextn: int | None = None,
         nextn_accept_rates: list[float] | str | None = None,
+        database_mode: str | None = None,
+        xe_compute_config: str | None = None,
     ):
         aic = _load_aiconfigurator()
         version = resolve_backend_version(backend_name, backend_version)
+        database_mode = resolve_database_mode(database_mode)
+        analytical = database_mode == DATABASE_MODE_ANALYTICAL
+        if analytical:
+            _activate_analytical_backend(system, xe_compute_config)
 
         database = aic["get_database"](
-            system=system, backend=backend_name, version=version
+            system=system,
+            backend=backend_name,
+            version=version,
+            # An analytical system has no collected grids on disk; the database
+            # is a carrier for the system YAML plus the patched query methods.
+            allow_missing_data=analytical,
         )
         if database is None:
             supported = (
@@ -193,6 +262,10 @@ class AicSession:
                 "AIC perf database not found for "
                 f"system={system!r}, backend={backend_name!r}, version={version!r}. "
                 f"Supported versions for this system/backend: {supported_versions}"
+            )
+        if analytical:
+            database.set_default_database_mode(
+                aic["common"].DatabaseMode[_ANALYTICAL_SDK_MODE]
             )
 
         model_config_kwargs: dict = dict(
@@ -234,24 +307,28 @@ class AicSession:
         self._backend = backend
         self._backend_name = backend_name
         self._database = database
+        self._database_mode = database_mode
         self._model = model
         self._model_name = getattr(model, "model_name", None) or model_path
         logger.info(
-            "AIC session initialized: backend=%s, system=%s, model=%s, tp=%d",
+            "AIC session initialized: backend=%s, system=%s, model=%s, tp=%d, mode=%s",
             backend_name,
             system,
             model_path,
             tp_size,
+            database_mode,
         )
 
         # Phase 1.5: compile the model's op list to a Rust Engine ONCE, so each
         # predict call is a single Rust dispatch instead of a per-call Python
         # walk over model.context_ops / generation_ops. Falls back to the
         # Python op-walk if the compiled AIC-core engine is unavailable or fails.
-        self._engine = self._build_compiled_engine()
+        # The compiled engine reads collected parquet grids in Rust and never
+        # re-enters Python, so it cannot see the analytical backend's patches.
+        self._engine = None if analytical else self._build_compiled_engine()
 
     def _build_compiled_engine(self):
-        """Build a cached aiconfigurator_core EngineHandle from the already-built
+        """Build a cached aiconfigurator EngineHandle from the already-built
         model, or return None to fall back to the Python op-walk."""
         if os.environ.get("DYNAMO_AIC_DISABLE_COMPILED_ENGINE"):
             logger.info(
@@ -259,7 +336,7 @@ class AicSession:
             )
             return None
         try:
-            from aiconfigurator_core.sdk.rust_engine_step import _cached_engine_handle
+            from aiconfigurator.sdk.rust_engine_step import _cached_engine_handle
         except Exception as exc:  # aiconfigurator-core without the compiled engine
             logger.info(
                 "AIC compiled-engine path unavailable (%s); using Python op-walk.",
@@ -366,6 +443,8 @@ def create_session(
     comm_dtype: str | None = None,
     nextn: int | None = None,
     nextn_accept_rates: list[float] | str | None = None,
+    database_mode: str | None = None,
+    xe_compute_config: str | None = None,
 ) -> AicSession:
     """Factory function called from Rust via PyO3."""
     return AicSession(
@@ -384,6 +463,8 @@ def create_session(
         comm_dtype=comm_dtype,
         nextn=nextn,
         nextn_accept_rates=nextn_accept_rates,
+        database_mode=database_mode,
+        xe_compute_config=xe_compute_config,
     )
 
 
@@ -406,6 +487,8 @@ def estimate_num_gpu_blocks(
     fmha_dtype: str | None = None,
     kv_cache_dtype: str | None = None,
     comm_dtype: str | None = None,
+    database_mode: str | None = None,
+    xe_compute_config: str | None = None,
 ) -> int:
     """Estimate rank-local KV cache blocks for mocker/replay AIC configs.
 
@@ -424,6 +507,9 @@ def estimate_num_gpu_blocks(
       HBM left after the model is loaded)
     """
     _validate_kv_capacity_backend(backend_name)
+    database_mode = resolve_database_mode(database_mode)
+    if database_mode == DATABASE_MODE_ANALYTICAL:
+        _activate_analytical_backend(system, xe_compute_config)
 
     if backend_name == "trtllm":
         memory_fraction_kind = "of_free"
@@ -450,13 +536,13 @@ def estimate_num_gpu_blocks(
     #   omitted due to a downstream AIC bug where `_get_memory_usage` predicts
     #   negative KV capacity with Eagle.
     try:
-        from aiconfigurator_core.sdk.memory import (
+        from aiconfigurator.sdk.memory import (
             estimate_num_gpu_blocks as aic_estimate_num_gpu_blocks,
         )
     except ImportError as exc:
         missing = exc.name or ""
-        if missing == "aiconfigurator_core" or missing.startswith(
-            "aiconfigurator_core."
+        if missing == "aiconfigurator" or missing.startswith(
+            "aiconfigurator."
         ):
             raise RuntimeError(
                 "aiconfigurator-core is required for AIC KV-cache estimation but is "
@@ -488,5 +574,10 @@ def estimate_num_gpu_blocks(
             fmha_quant_mode=_resolve_quant_mode_name("fmha", fmha_dtype),
             kvcache_quant_mode=_resolve_quant_mode_name("kvcache", kv_cache_dtype),
             comm_quant_mode=_resolve_quant_mode_name("comm", comm_dtype),
+            database_mode=(
+                _ANALYTICAL_SDK_MODE
+                if database_mode == DATABASE_MODE_ANALYTICAL
+                else database_mode
+            ),
         )
     )

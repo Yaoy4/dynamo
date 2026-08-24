@@ -179,6 +179,8 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
         fmha_dtype=_aic_quant_mode(raw, "aic_fmha_dtype"),
         kv_cache_dtype=_aic_quant_mode(raw, "aic_kv_cache_dtype"),
         comm_dtype=_aic_quant_mode(raw, "aic_comm_dtype"),
+        database_mode=raw.get("aic_database_mode"),
+        xe_compute_config=raw.get("aic_xe_compute_config"),
     )
     # AIC returns a per-rank (per-GPU) block count. Under attention-DP the offline runtime
     # mirrors the live path (lib/llm/src/mocker.rs): each mocker worker owns `dp`
@@ -334,6 +336,7 @@ def _generate_aic_prefill_fpms(
     prefill_fpms: list[ForwardPassMetrics] = []
     for isl in range(100, prefill_max + 1, prefill_step):
         ttft_ms = aic_session.predict_prefill(1, isl, 0)
+        print("---- ttft_ms ----: ", ttft_ms)
         if ttft_ms > 0:
             prefill_fpms.append(
                 ForwardPassMetrics(
@@ -799,6 +802,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         "(prefill_worker_idx=None indicates a conditional-prefill bypass).",
     )
     parser.add_argument(
+        "--per-pass-jsonl",
+        default=None,
+        help="optional path to emit one JSON object per offline scheduler pass. "
+        "Each line carries pass boundaries, prefill/decode batch sizes and token counts, "
+        "queued work, and modelled prefill/decode durations.",
+    )
+    parser.add_argument(
         "--planner-config",
         help="path to planner config YAML/JSON or inline JSON; enables planner-in-the-loop replay (offline agg/disagg)",
     )
@@ -899,6 +909,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(
             "--per-request-jsonl with online replay currently only supports trace files"
         )
+    if args.per_pass_jsonl is not None and args.replay_mode == "online":
+        parser.error("--per-pass-jsonl only supports --replay-mode=offline")
+    if (
+        args.per_request_jsonl is not None
+        and args.per_pass_jsonl is not None
+        and Path(args.per_request_jsonl).resolve() == Path(args.per_pass_jsonl).resolve()
+    ):
+        parser.error("--per-request-jsonl and --per-pass-jsonl must use different paths")
     if args.max_sim_time_seconds is not None:
         if args.planner_config is not None:
             parser.error(
@@ -928,8 +946,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "--planner-config only supports --trace-format=mooncake or dynamo"
             )
 
-    capture_per_request = (
-        args.replay_mode == "offline" and args.per_request_jsonl is not None
+    capture_per_request = args.replay_mode == "offline" and (
+        args.per_request_jsonl is not None or args.per_pass_jsonl is not None
     )
     replay_options = {
         "extra_engine_args": extra_engine_args,
@@ -951,6 +969,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "planner_config": args.planner_config,
         "benchmark_granularity": args.benchmark_granularity,
         "capture_per_request": capture_per_request,
+        "per_pass_jsonl_path": args.per_pass_jsonl,
     }
 
     if using_trace_file:
