@@ -80,6 +80,7 @@ def _materialize_offline_report(
         per_request=native.per_request,
         coverage=native.coverage,
         planner=planner,
+        aic_latency_breakdown=native.aic_latency_breakdown,
     )
 
 

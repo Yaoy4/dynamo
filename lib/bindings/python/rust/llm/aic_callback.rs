@@ -25,6 +25,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 #[cfg(feature = "aic-forward-pass")]
+use aiconfigurator_core::engine::LatencyAccumulator;
+#[cfg(feature = "aic-forward-pass")]
 use aiconfigurator_core::{AicEngine, AicEngineBuilder, BackendKind};
 use dynamo_kv_router::PrefillLoadEstimator;
 use dynamo_mocker::common::perf_model::AicCallback;
@@ -155,9 +157,32 @@ fn build_python_session(
 ///
 /// `AicEngine` is `Send + Sync` (it is an `Arc<Engine>` over an
 /// `Arc<PerfDatabase>`), so no manual `Send` / `Sync` implementation is needed.
+///
+/// `latency_breakdown` records the per-operator latency of every
+/// `predict_prefill` / `predict_decode` call the mocker makes (i.e. every
+/// forward pass it actually simulates) so [`Self::latency_percentages`] can
+/// report each operator's cumulative share of total latency across the run.
+/// Deliberately NOT fed from [`PrefillLoadEstimator::predict_prefill_duration`]
+/// below: the KV router calls that to *probe* candidate workers before
+/// routing, so folding it in here would count speculative what-if queries
+/// (on workers that may not even be chosen) as if they were real forward
+/// passes and skew the percentages.
 #[cfg(feature = "aic-forward-pass")]
 pub(super) struct RustAicCallback {
     engine: Arc<AicEngine>,
+    latency_breakdown: Mutex<LatencyAccumulator>,
+}
+
+#[cfg(feature = "aic-forward-pass")]
+impl RustAicCallback {
+    /// Every operator's cumulative share of total latency (percent), across
+    /// every `predict_prefill` / `predict_decode` call recorded so far.
+    /// Keyed by the same operator names AIC's Python model definitions use
+    /// (e.g. `"context_qkv_gemm"`, `"context_attention"`, `"context_moe"`) —
+    /// see `aiconfigurator_core::operators::Op::name`.
+    pub(super) fn latency_percentages(&self) -> HashMap<String, f64> {
+        self.latency_breakdown.lock().unwrap().final_percentages()
+    }
 }
 
 #[cfg(feature = "aic-forward-pass")]
@@ -173,19 +198,57 @@ impl AicCallback for RustAicCallback {
         // `effective_isl`. Pass `effective_isl + prefix` so the engine recovers
         // the same effective length (and keeps `prefix` for the KV-cache-aware
         // context-attention cost). Mirrors the Python AicSession adapter.
-        self.engine
-            .prefill_latency_ms(
+        let step = self
+            .engine
+            .prefill_latency_breakdown_ms(
                 batch_size as u32,
                 (effective_isl + prefix) as u32,
                 prefix as u32,
             )
-            .map_err(|error| anyhow::anyhow!("AIC predict_prefill (rust) failed: {error}"))
+            .map_err(|error| {
+                // `{error}` (Display) below is the message the caller's anyhow
+                // context eventually surfaces to Python; `{error:?}` (Debug) is
+                // strictly more detailed for the crate's structured `AicError`
+                // variants (e.g. `PerfDatabase` carries the missing quant-mode
+                // key), so log it at debug level for local troubleshooting
+                // without changing what callers see.
+                tracing::debug!(error = ?error, "AIC predict_prefill failed");
+                anyhow::anyhow!("AIC predict_prefill (rust) failed: {error}")
+            })?;
+        if tracing::enabled!(tracing::Level::TRACE) {
+            tracing::trace!(
+                total_ms = step.total_ms,
+                percentages = ?step.percentages(),
+                "AIC predict_prefill per-operator breakdown"
+            );
+        }
+        let total_ms = step.total_ms;
+        self.latency_breakdown.lock().unwrap().record(&step);
+        Ok(total_ms)
     }
 
     fn predict_decode(&self, batch_size: usize, isl: usize, osl: usize) -> anyhow::Result<f64> {
-        self.engine
-            .decode_latency_ms(batch_size as u32, isl as u32, osl as u32)
-            .map_err(|error| anyhow::anyhow!("AIC predict_decode (rust) failed: {error}"))
+        let step = self
+            .engine
+            .decode_latency_breakdown_ms(batch_size as u32, isl as u32, osl as u32)
+            .map_err(|error| {
+                tracing::debug!(error = ?error, "AIC predict_decode failed");
+                anyhow::anyhow!("AIC predict_decode (rust) failed: {error}")
+            })?;
+        if tracing::enabled!(tracing::Level::TRACE) {
+            tracing::trace!(
+                total_ms = step.total_ms,
+                percentages = ?step.percentages(),
+                "AIC predict_decode per-operator breakdown"
+            );
+        }
+        let total_ms = step.total_ms;
+        self.latency_breakdown.lock().unwrap().record(&step);
+        Ok(total_ms)
+    }
+
+    fn latency_breakdown_percentages(&self) -> Option<HashMap<String, f64>> {
+        Some(self.latency_percentages())
     }
 }
 
@@ -404,7 +467,10 @@ pub(super) fn create_aic_callback(
             nextn,
             nextn_accept_rates,
         )?;
-        Ok(Arc::new(RustAicCallback { engine }))
+        Ok(Arc::new(RustAicCallback {
+            engine,
+            latency_breakdown: Mutex::new(LatencyAccumulator::new()),
+        }))
     }
     #[cfg(not(feature = "aic-forward-pass"))]
     Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -479,7 +545,10 @@ pub(super) fn create_aic_prefill_load_estimator(
             nextn,
             nextn_accept_rates,
         )?;
-        Ok(Arc::new(RustAicCallback { engine }))
+        Ok(Arc::new(RustAicCallback {
+            engine,
+            latency_breakdown: Mutex::new(LatencyAccumulator::new()),
+        }))
     }
     #[cfg(not(feature = "aic-forward-pass"))]
     Err(pyo3::exceptions::PyRuntimeError::new_err(
