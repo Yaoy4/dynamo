@@ -2021,6 +2021,7 @@ where
                 arrival_time_ms,
                 metadata,
                 session_id,
+                parent_session_id,
                 turn_index,
             } = ready;
             let session_metadata = session_id.clone().zip(turn_index);
@@ -2032,7 +2033,7 @@ where
             )?;
             if let Some((session_id, turn_index)) = session_metadata {
                 self.collector
-                    .on_session_metadata(uuid, session_id, turn_index);
+                    .on_session_metadata(uuid, session_id, turn_index, parent_session_id);
             }
             released_any = true;
         }

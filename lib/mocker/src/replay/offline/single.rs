@@ -11,6 +11,21 @@ use anyhow::{Context, bail};
 use std::collections::VecDeque;
 use uuid::Uuid;
 
+/// `(session_id, turn_index, parent_session_id)`, present only when the
+/// workload driver has session metadata to report for this turn (see
+/// `ReadyTurn::emit_session_metadata`).
+type SessionMetadata = Option<(String, usize, Option<String>)>;
+
+fn session_metadata_of(ready: &crate::loadgen::ReadyTurn) -> SessionMetadata {
+    ready.emit_session_metadata.then(|| {
+        (
+            ready.session_id.clone(),
+            ready.turn_index,
+            ready.parent_session_id.clone(),
+        )
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) enum SingleReplayMode {
     Trace,
@@ -113,7 +128,7 @@ impl SingleRuntime {
     }
 
     fn enqueue_trace_arrivals(&mut self) {
-        let mut ready_requests = Vec::new();
+        let mut ready_requests: Vec<(DirectRequest, f64, SessionMetadata)> = Vec::new();
         match &mut self.admission {
             AdmissionSource::Requests(pending) => {
                 while let Some(next_arrival_ms) = pending
@@ -130,7 +145,7 @@ impl SingleRuntime {
                     let arrival_ms = request
                         .arrival_timestamp_ms
                         .expect("trace replay requests must have an arrival timestamp");
-                    ready_requests.push((request, arrival_ms));
+                    ready_requests.push((request, arrival_ms, None));
                 }
             }
             AdmissionSource::Workload(driver) => {
@@ -138,19 +153,23 @@ impl SingleRuntime {
                     driver
                         .pop_ready(self.current_time_ms, usize::MAX)
                         .into_iter()
-                        .map(|ready| (ready.request, ready.scheduled_ready_at_ms)),
+                        .map(|ready| {
+                            let scheduled_ready_at_ms = ready.scheduled_ready_at_ms;
+                            let session_metadata = session_metadata_of(&ready);
+                            (ready.request, scheduled_ready_at_ms, session_metadata)
+                        }),
                 );
             }
         }
 
-        for (request, arrival_ms) in ready_requests {
-            self.record_arrival(request, arrival_ms);
+        for (request, arrival_ms, session_metadata) in ready_requests {
+            self.record_arrival(request, arrival_ms, session_metadata);
         }
     }
 
     fn enqueue_concurrency_arrivals(&mut self, max_in_flight: usize) {
         let available = max_in_flight.saturating_sub(self.worker.num_requests());
-        let mut ready_requests = Vec::new();
+        let mut ready_requests: Vec<(DirectRequest, SessionMetadata)> = Vec::new();
 
         match &mut self.admission {
             AdmissionSource::Requests(pending) => {
@@ -159,7 +178,7 @@ impl SingleRuntime {
                         break;
                     };
                     request.arrival_timestamp_ms = Some(self.current_time_ms);
-                    ready_requests.push(request);
+                    ready_requests.push((request, None));
                 }
             }
             AdmissionSource::Workload(driver) => {
@@ -167,17 +186,25 @@ impl SingleRuntime {
                     driver
                         .pop_ready(self.current_time_ms, available)
                         .into_iter()
-                        .map(|ready| ready.request),
+                        .map(|ready| {
+                            let session_metadata = session_metadata_of(&ready);
+                            (ready.request, session_metadata)
+                        }),
                 );
             }
         }
 
-        for request in ready_requests {
-            self.record_arrival(request, self.current_time_ms);
+        for (request, session_metadata) in ready_requests {
+            self.record_arrival(request, self.current_time_ms, session_metadata);
         }
     }
 
-    fn record_arrival(&mut self, request: DirectRequest, arrival_ms: f64) -> Uuid {
+    fn record_arrival(
+        &mut self,
+        request: DirectRequest,
+        arrival_ms: f64,
+        session_metadata: SessionMetadata,
+    ) -> Uuid {
         let input_length = request.tokens.len();
         let output_length = request.max_output_tokens;
         let uuid = self.worker.receive(request);
@@ -186,6 +213,10 @@ impl SingleRuntime {
         self.collector.on_decode_assigned(uuid, 0);
         self.collector
             .on_route_immediate(uuid, ReplayRequestPool::Agg, 0, 0, 0, 0);
+        if let Some((session_id, turn_index, parent_session_id)) = session_metadata {
+            self.collector
+                .on_session_metadata(uuid, session_id, turn_index, parent_session_id);
+        }
         uuid
     }
 

@@ -152,6 +152,7 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
                         arrival_time_ms,
                         metadata: Metadata::from_hashes(None),
                         session_id: None,
+                        parent_session_id: None,
                         turn_index: None,
                     });
                 }
@@ -162,12 +163,17 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
                 .into_iter()
                 .map(|ready| {
                     let session_id = ready.emit_session_metadata.then_some(ready.session_id);
+                    let parent_session_id = ready
+                        .emit_session_metadata
+                        .then_some(ready.parent_session_id)
+                        .flatten();
                     let turn_index = ready.emit_session_metadata.then_some(ready.turn_index);
                     ReadyArrival {
                         request: ready.request,
                         arrival_time_ms: ready.scheduled_ready_at_ms,
                         metadata: Metadata::from_hashes(ready.replay_hashes),
                         session_id,
+                        parent_session_id,
                         turn_index,
                     }
                 })
@@ -185,6 +191,7 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
                         arrival_time_ms: now_ms,
                         metadata: Metadata::from_hashes(None),
                         session_id: None,
+                        parent_session_id: None,
                         turn_index: None,
                     });
                     simulated_in_flight += 1;
@@ -199,12 +206,17 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
                     .into_iter()
                     .map(|ready| {
                         let session_id = ready.emit_session_metadata.then_some(ready.session_id);
+                        let parent_session_id = ready
+                            .emit_session_metadata
+                            .then_some(ready.parent_session_id)
+                            .flatten();
                         let turn_index = ready.emit_session_metadata.then_some(ready.turn_index);
                         ReadyArrival {
                             request: ready.request,
                             arrival_time_ms: now_ms,
                             metadata: Metadata::from_hashes(ready.replay_hashes),
                             session_id,
+                            parent_session_id,
                             turn_index,
                         }
                     })

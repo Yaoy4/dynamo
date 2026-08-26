@@ -105,6 +105,7 @@ pub struct TurnTrace {
 pub struct AgenticTurnTrace {
     pub request_id: String,
     pub session_id: String,
+    pub parent_session_id: Option<String>,
     pub input_length: usize,
     pub max_output_tokens: usize,
     pub output_token_ids: Option<Vec<u32>>,
@@ -197,6 +198,7 @@ impl ReplayRequestHashes {
 pub struct ReadyTurn {
     pub request_uuid: Uuid,
     pub session_id: String,
+    pub parent_session_id: Option<String>,
     pub turn_index: usize,
     pub emit_session_metadata: bool,
     pub replay_key: Option<String>,
@@ -320,6 +322,7 @@ impl ReplayRequestPayload {
 pub(crate) struct CompactReadyTurn {
     pub(crate) request_uuid: Uuid,
     pub(crate) session_id: String,
+    pub(crate) parent_session_id: Option<String>,
     pub(crate) turn_index: usize,
     pub(crate) replay_key: Option<String>,
     pub(crate) scheduled_ready_at_ms: f64,
@@ -333,6 +336,7 @@ impl CompactReadyTurn {
         ReadyTurn {
             request_uuid: self.request_uuid,
             session_id: self.session_id,
+            parent_session_id: self.parent_session_id,
             turn_index: self.turn_index,
             emit_session_metadata: self.emit_session_metadata,
             replay_key: self.replay_key,

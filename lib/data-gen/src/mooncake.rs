@@ -76,6 +76,12 @@ pub struct AgenticMooncakeRow {
     pub request_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Session id of the parent agent session that spawned this row's
+    /// session, when this session is a sub-agent turn. `None` for top-level
+    /// (main-agent) sessions. Mirrors the `parent_by_session` map computed
+    /// during agentic trace lowering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
     #[serde(default, alias = "input_tokens")]
     pub input_length: Option<usize>,
     #[serde(default, alias = "output_tokens")]

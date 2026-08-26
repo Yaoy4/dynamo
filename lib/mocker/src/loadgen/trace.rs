@@ -1251,6 +1251,7 @@ impl AgenticTraceBuilder {
             session_id: raw
                 .session_id
                 .unwrap_or_else(|| format!("request_{}", line_idx + 1)),
+            parent_session_id: raw.parent_session_id,
             input_length,
             max_output_tokens: output_length,
             output_token_ids,

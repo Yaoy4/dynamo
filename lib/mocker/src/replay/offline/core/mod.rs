@@ -21,6 +21,7 @@ pub(crate) struct ReadyArrival<Request, Metadata> {
     pub(in crate::replay::offline) arrival_time_ms: f64,
     pub(in crate::replay::offline) metadata: Metadata,
     pub(in crate::replay::offline) session_id: Option<String>,
+    pub(in crate::replay::offline) parent_session_id: Option<String>,
     pub(in crate::replay::offline) turn_index: Option<usize>,
 }
 

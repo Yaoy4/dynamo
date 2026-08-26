@@ -310,6 +310,7 @@ where
             AgenticMooncakeRow {
                 request_id: request.request.request_id.clone(),
                 session_id: Some(session_id.clone()),
+                parent_session_id: parent_by_session.get(&session_id).cloned(),
                 input_length: Some(request.replay.input_length),
                 output_length: Some(
                     usize::try_from(output_length)

@@ -416,6 +416,11 @@ struct TraceRequestStats {
     /// trace source carries it (e.g., multi-turn Mooncake). `None` for raw
     /// single-shot request lists.
     session_id: Option<String>,
+    /// Session id of the parent agent session, when `session_id` names a
+    /// sub-agent session spawned during an agentic trace replay. `None` for
+    /// main-agent (top-level) sessions and for traces with no agent
+    /// hierarchy at all.
+    parent_session_id: Option<String>,
     turn_index: Option<usize>,
     detail: Option<Box<PerRequestDetail>>,
 }
@@ -605,6 +610,11 @@ pub struct PerRequestRecord {
     /// so each JSONL row leads with its session/turn identity, matching
     /// AIPerf's `profile_export.jsonl` layout.
     pub session_id: Option<String>,
+    /// Session id of the parent agent session, when `session_id` names a
+    /// sub-agent session spawned during an agentic trace replay (see
+    /// `--trace-format agentic_mooncake`). `None` for main-agent (top-level)
+    /// sessions and for trace formats with no agent hierarchy.
+    pub parent_session_id: Option<String>,
     /// Zero-based turn index within `session_id`, when present.
     pub turn_index: Option<usize>,
     pub uuid: String,
@@ -909,6 +919,7 @@ impl TraceCollector {
                 prefill_worker_idx: None,
                 decode_worker_idx: None,
                 session_id: None,
+                parent_session_id: None,
                 turn_index: None,
                 first_admission_reused_input_tokens: 0,
                 detail: self
@@ -927,6 +938,7 @@ impl TraceCollector {
         uuid: Uuid,
         session_id: String,
         turn_index: usize,
+        parent_session_id: Option<String>,
     ) {
         if !self.capture_per_request {
             return;
@@ -935,6 +947,7 @@ impl TraceCollector {
             && stats.session_id.is_none()
         {
             stats.session_id = Some(session_id);
+            stats.parent_session_id = parent_session_id;
             stats.turn_index = Some(turn_index);
         }
     }
@@ -1512,6 +1525,7 @@ impl TraceCollector {
             let last_token_ms = stats.last_token_ms();
             records.push(PerRequestRecord {
                 session_id: stats.session_id.clone(),
+                parent_session_id: stats.parent_session_id.clone(),
                 turn_index: stats.turn_index,
                 uuid: uuid.to_string(),
                 arrival_time_ms: stats.arrival_time_ms,
@@ -2037,7 +2051,7 @@ mod tests {
         // Note: NOT calling set_capture_per_request — capture stays false.
         let uuid = Uuid::from_u128(1);
         collector.on_arrival(uuid, 0.0, 100, 2);
-        collector.on_session_metadata(uuid, "session".to_string(), 0);
+        collector.on_session_metadata(uuid, "session".to_string(), 0, None);
         collector.on_prefill_route_overlap(uuid, 48);
         collector.on_decode_route_overlap(uuid, 24);
         collector.on_route_immediate(uuid, ReplayRequestPool::Prefill, 7, 14, 1, 48);

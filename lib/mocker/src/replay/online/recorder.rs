@@ -174,7 +174,9 @@ async fn run_recorder(
                 uuid,
                 session_id,
                 turn_index,
-            } => collector.on_session_metadata(uuid, session_id, turn_index),
+            // Online replay has no agentic-trace path, so there is no parent
+            // session to report.
+            } => collector.on_session_metadata(uuid, session_id, turn_index, None),
             RecorderEvent::DecodeAssigned { uuid, worker_idx } => {
                 collector.on_decode_assigned(uuid, worker_idx);
             }

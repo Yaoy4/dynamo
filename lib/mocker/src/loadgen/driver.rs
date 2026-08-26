@@ -60,6 +60,7 @@ struct TurnResolution {
 #[derive(Debug)]
 struct SessionRuntime {
     session_id: String,
+    parent_session_id: Option<String>,
     turns: Vec<TurnRuntime>,
     cumulative_tokens: Vec<u32>,
     next_turn_index: usize,
@@ -457,6 +458,7 @@ impl WorkloadDriver {
             };
             sessions.push(SessionRuntime {
                 session_id: turn.session_id,
+                parent_session_id: turn.parent_session_id,
                 turns: vec![TurnRuntime {
                     request_id: Some(turn.request_id),
                     replay_key: turn.replay_key,
@@ -600,6 +602,7 @@ impl WorkloadDriver {
                 };
                 Ok(SessionRuntime {
                     session_id: session.session_id,
+                    parent_session_id: None,
                     turns,
                     cumulative_tokens: Vec::with_capacity(cumulative_capacity),
                     next_turn_index: 0,
@@ -803,6 +806,7 @@ impl WorkloadDriver {
             emitted.push(CompactReadyTurn {
                 request_uuid,
                 session_id: session.session_id.clone(),
+                parent_session_id: session.parent_session_id.clone(),
                 turn_index,
                 replay_key: turn.replay_key.clone(),
                 scheduled_ready_at_ms,
