@@ -1,0 +1,71 @@
+{
+  "source_dataset": "semianalysisai/cc-traces-weka-062126",
+  "isl": {
+    "all": {
+      "n": 98827,
+      "mean": 218921.76607607232,
+      "median": 142016,
+      "p90": 549504,
+      "p99": 863488,
+      "max": 989824
+    },
+    "main": {
+      "n": 56798,
+      "mean": 313542.7619282369,
+      "median": 254080.0,
+      "p90": 651008,
+      "p99": 897920,
+      "max": 989824
+    },
+    "child": {
+      "n": 42029,
+      "mean": 91050.93111898928,
+      "median": 64000,
+      "p90": 196480,
+      "p99": 455808,
+      "max": 918464
+    }
+  },
+  "osl": {
+    "all": {
+      "n": 98827,
+      "mean": 1077.382678822589,
+      "median": 444,
+      "p90": 2659,
+      "p99": 9311,
+      "max": 59903
+    },
+    "main": {
+      "n": 56798,
+      "mean": 1373.960861297933,
+      "median": 615.5,
+      "p90": 3502,
+      "p99": 10346,
+      "max": 40339
+    },
+    "child": {
+      "n": 42029,
+      "mean": 676.5868566941873,
+      "median": 328,
+      "p90": 1261,
+      "p99": 6710,
+      "max": 59903
+    }
+  },
+  "batch_size": {
+    "intrinsic_unconstrained": {
+      "n_leaves": 98827,
+      "total_busy_seconds": 1218472.670000019,
+      "span_seconds": 917243.082,
+      "span_days": 10.616239375000001,
+      "avg_concurrency": 1.328407587815439
+    },
+    "observed_scenario1_8worker": {
+      "request_throughput_rps": 0.10889047664767569,
+      "mean_e2e_latency_ms": 19761.04374955157,
+      "num_workers": 8,
+      "avg_concurrency_system_wide": 2.151789472944243,
+      "avg_concurrency_per_worker": 0.26897368411803035
+    }
+  }
+}

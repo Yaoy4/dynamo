@@ -1,0 +1,14 @@
+{
+  "sessions": 393,
+  "main_rows": 56798,
+  "child_rows": 42029,
+  "total_rows": 98827,
+  "total_input_tokens": 21635381376,
+  "total_output_tokens": 106474498,
+  "child_groups": 1697,
+  "rows_with_dependencies": 98434,
+  "rows_with_clamped_overlap": 6981,
+  "max_clamped_overlap_ms": 384366.0,
+  "input": "data/traces.jsonl",
+  "output": "data/semianalysis_cc_traces.agentic_mooncake.jsonl"
+}
