@@ -256,6 +256,8 @@ def _load_aic_perf_config(args: argparse.Namespace):
         "aic_system": args.aic_system,
         "aic_model_path": args.aic_model_path,
         "aic_backend_version": args.aic_backend_version,
+        "aic_database_mode": args.aic_database_mode,
+        "aic_xe_compute_config": args.aic_xe_compute_config,
         "aic_tp_size": args.aic_tp_size,
         "aic_moe_tp_size": args.aic_moe_tp_size,
         "aic_moe_ep_size": args.aic_moe_ep_size,
@@ -289,6 +291,8 @@ def _load_aic_perf_config(args: argparse.Namespace):
         aic_model_path=values["aic_model_path"],
         aic_tp_size=values["aic_tp_size"] or 1,
         aic_backend_version=values["aic_backend_version"],
+        aic_database_mode=values["aic_database_mode"],
+        aic_xe_compute_config=values["aic_xe_compute_config"],
         aic_moe_tp_size=values["aic_moe_tp_size"],
         aic_moe_ep_size=values["aic_moe_ep_size"],
         aic_attention_dp_size=values["aic_attention_dp_size"],
@@ -679,6 +683,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--aic-backend")
     parser.add_argument("--aic-system")
     parser.add_argument("--aic-backend-version")
+    parser.add_argument(
+        "--aic-database-mode",
+        choices=["SILICON", "ANALYTICAL"],
+        help="AIC perf-data provenance for the KV-router prefill-load "
+        "estimator. 'SILICON' (default when omitted) reads collected "
+        "hardware-measured grids off disk for --aic-system. 'ANALYTICAL' "
+        "(aka the Intel Xe / KAPA backend) computes every kernel at query "
+        "time from the vendor analytical model instead; requires "
+        "--aic-xe-compute-config.",
+    )
+    parser.add_argument(
+        "--aic-xe-compute-config",
+        help="Intel Xe GPU compute config (e.g. 'xe5_96') selecting which "
+        "analytical kernel model backs --aic-database-mode=ANALYTICAL. "
+        "Ignored when --aic-database-mode is unset or 'SILICON'.",
+    )
     parser.add_argument("--aic-tp-size", type=int)
     parser.add_argument("--aic-model-path")
     parser.add_argument("--aic-moe-tp-size", type=int)

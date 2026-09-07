@@ -1,18 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Trace distribution report for `dynamo.replay` captures.
+"""Offline replay distribution report for `dynamo.replay` captures.
 
-Renders a 6-panel histogram summary -- inter-turn think-time, input/output
-sequence length, per-request cache-hit rate, main-agent turns per session, and
-average sub-agent turn depth -- from a `--per-request-jsonl` capture. This
-describes the trace/replay-capture layer only (arrival timestamps, token
-counts, session structure); it does not depend on which perf backend (AIC or
-otherwise) supplied the latency predictions, so it works for any trace format
-`dynamo.replay` can ingest.
+Renders input/output sequence length, per-request cache-hit rate, and predicted
+latency shares by operator from one complete offline `--report-json` file.
 
 Usage:
-    python report/trace_distributions.py --per-request-jsonl trace.jsonl --output report.png
+    python report/trace_distributions.py --report-json replay.json --output report.png
 """
 
 from __future__ import annotations
@@ -33,6 +28,59 @@ import numpy as np
 
 _PERCENTILES = (50, 75, 90, 99)
 _PERCENTILE_COLORS = {50: "tab:blue", 75: "tab:green", 90: "tab:orange", 99: "tab:red"}
+
+
+def _operator_shares(report: dict[str, Any]) -> list[tuple[str, float]]:
+    detailed_breakdown = report.get("aic_operator_breakdown")
+    if detailed_breakdown:
+        shares = [
+            (operator["op_name"], float(operator["pct_of_grand_total"]))
+            for operator in detailed_breakdown.get("op_summary_across_phases", [])
+            if operator.get("op_name") is not None
+            and operator.get("pct_of_grand_total") is not None
+        ]
+        if shares:
+            return shares
+
+    latency_breakdown = report.get("aic_latency_breakdown")
+    if latency_breakdown:
+        totals: dict[str, float] = {}
+        for phase in latency_breakdown.values():
+            for operator, percentage in phase.items():
+                totals[operator] = totals.get(operator, 0.0) + float(percentage)
+        grand_total = sum(totals.values())
+        if grand_total:
+            return sorted(
+                (
+                    (operator, 100.0 * percentage / grand_total)
+                    for operator, percentage in totals.items()
+                ),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+
+    return []
+
+
+def _matrix_operator_shares(
+    path: str | Path, model_key: str, dataset: str
+) -> list[tuple[str, float]]:
+    matrix = json.loads(Path(path).read_text(encoding="utf-8"))
+    try:
+        breakdown = matrix[model_key]["datasets"][dataset]["breakdown_pct"]
+    except KeyError as exc:
+        raise ValueError(
+            f"operator results do not contain {model_key}.datasets.{dataset}.breakdown_pct"
+        ) from exc
+    return sorted(
+        (
+            (operator, float(percentage))
+            for operator, percentage in breakdown.items()
+            if float(percentage) > 0.0
+        ),
+        key=lambda item: item[1],
+        reverse=True,
+    )
 
 
 def load_per_request_records(path: str | Path) -> list[dict[str, Any]]:
@@ -133,6 +181,46 @@ def _hist_panel(
     ax.set_ylabel("count")
 
 
+def _operator_share_panel(ax, shares: Sequence[tuple[str, float]]) -> None:
+    if not shares:
+        ax.set_title(
+            "Predicted latency by operator\n"
+            "No operator breakdown in this offline report",
+            fontsize=10,
+        )
+        ax.set_xlabel("operator")
+        ax.set_ylabel("share of predicted latency (%)")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        return
+
+    labels, percentages = zip(*shares, strict=True)
+    array = np.asarray(percentages, dtype=float)
+    positions = np.arange(len(labels))
+    header = (
+        f"N = {array.size:,}   "
+        f"min = {_fmt(array.min(), False)}   "
+        f"max = {_fmt(array.max(), False)}   "
+        f"mean = {_fmt(array.mean(), False)}"
+    )
+    ax.bar(positions, array, color="gray", edgecolor="black", linewidth=0.3)
+    ax.set_title(f"Predicted latency share by operator\n{header}", fontsize=10)
+    ax.set_xlabel("operator")
+    ax.set_ylabel("share of predicted latency (%)")
+    ax.set_xticks(positions, labels, rotation=35, ha="right", fontsize=8)
+    ax.set_ylim(bottom=0)
+    for percentile in _PERCENTILES:
+        value = float(np.percentile(array, percentile))
+        ax.axhline(
+            value,
+            color=_PERCENTILE_COLORS[percentile],
+            linestyle="--",
+            linewidth=1.2,
+            label=f"p{percentile} = {_fmt(value, False)}",
+        )
+    ax.legend(fontsize=8, loc="upper right")
+
+
 def _cache_hit_ratios(records: list[dict[str, Any]], block_size: int) -> list[float]:
     ratios = []
     for record in records:
@@ -231,22 +319,19 @@ def _agent_turn_depth_per_session(records: list[dict[str, Any]]) -> list[float]:
     return depths
 
 
-def build_report(records: list[dict[str, Any]], block_size: int = 512):
+def build_report(
+    records: list[dict[str, Any]],
+    operator_shares: Sequence[tuple[str, float]],
+    block_size: int = 512,
+):
     isl = [r["input_length"] for r in records if r.get("input_length") is not None]
     osl = [r["output_length"] for r in records if r.get("output_length") is not None]
 
-    fig, axes = plt.subplots(3, 2, figsize=(20, 16))
-    fig.suptitle("DynoSim trace distributions (log-x)", fontsize=16)
+    fig, axes = plt.subplots(2, 2, figsize=(20, 11))
+    fig.suptitle("DynoSim offline replay distributions", fontsize=16)
 
     _hist_panel(
         axes[0][0],
-        _inter_turn_think_times_seconds(records),
-        "Inter-turn latency (think_time)",
-        "seconds (log)",
-        log_x=True,
-    )
-    _hist_panel(
-        axes[0][1],
         isl,
         "Input sequence length per request",
         "tokens (log)",
@@ -254,7 +339,7 @@ def build_report(records: list[dict[str, Any]], block_size: int = 512):
         is_int=True,
     )
     _hist_panel(
-        axes[1][0],
+        axes[0][1],
         osl,
         "Output sequence length per request",
         "tokens (log)",
@@ -262,38 +347,42 @@ def build_report(records: list[dict[str, Any]], block_size: int = 512):
         is_int=True,
     )
     _hist_panel(
-        axes[1][1],
+        axes[1][0],
         _cache_hit_ratios(records, block_size),
         f"Per-request cache hit rate (block_size={block_size})",
         "hits / total blocks",
         log_x=False,
     )
-    _hist_panel(
-        axes[2][0],
-        _main_agent_turns_per_session(records),
-        "Main-agent turns per session",
-        "turns (top-level requests, excluding subagent inners) (log)",
-        log_x=True,
-        is_int=True,
-    )
-    _hist_panel(
-        axes[2][1],
-        _agent_turn_depth_per_session(records),
-        "Average agent turn depth per session (main + sub-agents)",
-        "mean turns per agent (over the session's main + each sub-agent) (log)",
-        log_x=True,
-    )
+    _operator_share_panel(axes[1][1], operator_shares)
 
     plt.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
     return fig
 
 
+_DEFAULT_OUTPUT = Path(__file__).resolve().parent / "trace_distributions.png"
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="report/trace_distributions.py")
     parser.add_argument(
-        "--per-request-jsonl",
+        "--report-json",
         required=True,
-        help="dynamo.replay --per-request-jsonl output, or a --report-json file containing a per_request list",
+        help="complete offline dynamo.replay --report-json output",
+    )
+    parser.add_argument(
+        "--operator-results-json",
+        help="full dynamic matrix JSON containing datasets.<name>.breakdown_pct; "
+        "defaults to the operator breakdown embedded in --report-json",
+    )
+    parser.add_argument(
+        "--operator-model-key",
+        default="qwen3_1_7b_dense",
+        help="model key in --operator-results-json (default: qwen3_1_7b_dense)",
+    )
+    parser.add_argument(
+        "--operator-dataset",
+        choices=("conversation", "mooncake", "synthetic", "toolagent"),
+        help="dataset key in --operator-results-json",
     )
     parser.add_argument(
         "--block-size",
@@ -302,14 +391,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="tokens per cache block for the cache-hit-rate panel (default: 512, matching "
         "dynamo.replay's --trace-block-size default)",
     )
-    parser.add_argument("--output", default="trace_distributions.png", help="output PNG path")
+    parser.add_argument(
+        "--output",
+        default=str(_DEFAULT_OUTPUT),
+        help=f"output PNG path (default: alongside this script, {_DEFAULT_OUTPUT})",
+    )
     args = parser.parse_args(argv)
 
-    records = load_per_request_records(args.per_request_jsonl)
+    report_path = Path(args.report_json)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    records = report.get("per_request")
+    if records is None:
+        raise SystemExit(
+            f"{report_path} has no per_request records; rerun offline replay with "
+            "--per-request-jsonl to enable capture"
+        )
     if not records:
-        raise SystemExit(f"no per-request records found in {args.per_request_jsonl}")
+        raise SystemExit(f"no per-request records found in {report_path}")
 
-    fig = build_report(records, block_size=args.block_size)
+    if args.operator_results_json:
+        if args.operator_dataset is None:
+            parser.error("--operator-dataset is required with --operator-results-json")
+        operator_shares = _matrix_operator_shares(
+            args.operator_results_json,
+            args.operator_model_key,
+            args.operator_dataset,
+        )
+    else:
+        operator_shares = _operator_shares(report)
+
+    fig = build_report(records, operator_shares, block_size=args.block_size)
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=130)
