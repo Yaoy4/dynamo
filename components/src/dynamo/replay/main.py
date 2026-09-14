@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import importlib
 import json
+import logging
 import os
 import sys
 from collections.abc import Sequence
@@ -25,6 +26,8 @@ from dynamo._internal.aic import (
     DEFAULT_MEM_FRACTION_STATIC,
     _normalize_aic_quant_mode,
     estimate_num_gpu_blocks,
+    get_kapa_cache_stats,
+    get_xe_perf_cache_stats,
 )
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
@@ -66,6 +69,42 @@ def _load_router_config(
 
 _DEFAULT_SGLANG_BLOCK_SIZE = 1
 _DEFAULT_TRTLLM_BLOCK_SIZE = 32
+
+_KAPA_LOGGER_NAMES = (
+    "intel_xe.analytical_session",
+    "intel_xe.xe_perf_cache",
+    "kapa_data.dynosim_patch",
+)
+
+
+def _configure_kapa_logging() -> None:
+    """Expose KAPA lifecycle logs without enabling every Python logger."""
+    raw_mode = os.environ.get("DYNAMO_AIC_KAPA_CACHE")
+    if raw_mode is None or raw_mode.strip().lower() in {
+        "off",
+        "0",
+        "false",
+        "no",
+        "none",
+        "disable",
+        "disabled",
+    }:
+        return
+
+    for logger_name in _KAPA_LOGGER_NAMES:
+        logger = logging.getLogger(logger_name)
+        if not any(
+            getattr(handler, "_dynamo_replay_kapa_handler", False)
+            for handler in logger.handlers
+        ):
+            handler = logging.StreamHandler(sys.stderr)
+            handler.setFormatter(
+                logging.Formatter("KAPA %(levelname)s %(name)s: %(message)s")
+            )
+            handler._dynamo_replay_kapa_handler = True  # type: ignore[attr-defined]
+            logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
 
 
 def resolve_planner_profile_data(
@@ -658,6 +697,7 @@ def _write_per_request_jsonl(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    _configure_kapa_logging()
     parser = argparse.ArgumentParser(prog="python -m dynamo.replay")
     parser.add_argument("trace_files", nargs="*")
     parser.add_argument("--extra-engine-args")
@@ -1012,10 +1052,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.per_request_jsonl is not None and not using_trace_file:
             _write_per_request_jsonl(args.per_request_jsonl, report.per_request)
 
+    kapa_stats = get_kapa_cache_stats()
+    if kapa_stats:
+        report_payload["kapa_cache"] = kapa_stats
+    json_cache_stats = get_xe_perf_cache_stats()
+    if json_cache_stats:
+        report_payload["json_cache"] = json_cache_stats
     report_path = write_report_json(report_payload, args.report_json)
     sys.stdout.write(format_report_table(summary))
     sys.stdout.write("\n")
     sys.stdout.write(f"Saved full report to: {report_path}\n")
+    if kapa_stats:
+        sys.stderr.write(
+            "KAPA cache stats:\n"
+            + json.dumps(kapa_stats, indent=2, sort_keys=True)
+            + "\n"
+        )
+    if json_cache_stats:
+        sys.stderr.write(
+            "AIC JSON cache stats: "
+            + json.dumps(json_cache_stats, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        )
     if args.replay_mode == "offline" and report.planner is not None:
         planner = report.planner
         if planner.scaling_events:

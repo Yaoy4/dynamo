@@ -42,6 +42,12 @@ DATABASE_MODE_ANALYTICAL = "ANALYTICAL"
 _ANALYTICAL_SDK_MODE = "EMPIRICAL"
 _SUPPORTED_DATABASE_MODES = (DATABASE_MODE_SILICON, DATABASE_MODE_ANALYTICAL)
 
+# Optional shared analytical-result cache.  It is deliberately opt-in because
+# the package and database live outside Dynamo's normal installation.
+_KAPA_CACHE_MODE_ENV = "DYNAMO_AIC_KAPA_CACHE"
+_KAPA_CONFIG_ENV = "KAPA_DATA_CONFIG"
+_KAPA_VERSION_ENV = "DYNAMO_AIC_KAPA_VERSION"
+
 
 def resolve_database_mode(database_mode: str | None) -> str:
     """Normalize the perf-data mode; ``None`` means the historical SILICON path."""
@@ -58,7 +64,12 @@ def resolve_database_mode(database_mode: str | None) -> str:
     return normalized
 
 
-def _activate_analytical_backend(system: str, xe_compute_config: str | None) -> None:
+def _activate_analytical_backend(
+    system: str,
+    xe_compute_config: str | None,
+    *,
+    backend_name: str | None = None,
+) -> None:
     """Install the vendor analytical perf backend for the process lifetime.
 
     The backend replaces ``PerfDatabase.query_*`` at the class level and must
@@ -77,7 +88,14 @@ def _activate_analytical_backend(system: str, xe_compute_config: str | None) -> 
             "from the Intel aiconfigurator distribution, which is not installed"
         ) from exc
 
-    analytical_session.activate(system, xe_compute_config)
+    analytical_session.activate(
+        system,
+        xe_compute_config,
+        kapa_cache_mode=os.environ.get(_KAPA_CACHE_MODE_ENV),
+        kapa_config_path=os.environ.get(_KAPA_CONFIG_ENV),
+        kapa_backend=backend_name,
+        kapa_version=os.environ.get(_KAPA_VERSION_ENV),
+    )
     unsupported = analytical_session.unsupported_kernels()
     if unsupported:
         # These still answer, but with the NVIDIA model — silently wrong numbers.
@@ -87,6 +105,26 @@ def _activate_analytical_backend(system: str, xe_compute_config: str | None) -> 
             ", ".join(sorted(unsupported)),
             system,
         )
+
+
+def get_kapa_cache_stats() -> dict[str, dict[str, object]]:
+    """Return KAPA counters when the optional analytical integration is active."""
+    try:
+        from intel_xe import analytical_session
+    except ImportError:
+        return {}
+    return analytical_session.kapa_cache_stats()
+
+
+def get_xe_perf_cache_stats() -> list[dict[str, object]]:
+    """Return counters for the optional persistent Xe JSONL cache."""
+    try:
+        from intel_xe import xe_perf_cache
+    except ImportError:
+        return []
+    return xe_perf_cache.all_stats()
+
+
 # --- AIC per-operator latency profiling (opt-in) ----------------------------
 # Set DYNAMO_AIC_PROFILE_OPS=1 to accumulate each operator's contribution to
 # predicted latency across every predict_prefill/predict_decode call made
@@ -402,7 +440,9 @@ class AicSession:
         database_mode = resolve_database_mode(database_mode)
         analytical = database_mode == DATABASE_MODE_ANALYTICAL
         if analytical:
-            _activate_analytical_backend(system, xe_compute_config)
+            _activate_analytical_backend(
+                system, xe_compute_config, backend_name=backend_name
+            )
 
         database = aic["get_database"](
             system=system,
@@ -682,7 +722,9 @@ def estimate_num_gpu_blocks(
     _validate_kv_capacity_backend(backend_name)
     database_mode = resolve_database_mode(database_mode)
     if database_mode == DATABASE_MODE_ANALYTICAL:
-        _activate_analytical_backend(system, xe_compute_config)
+        _activate_analytical_backend(
+            system, xe_compute_config, backend_name=backend_name
+        )
 
     if backend_name == "trtllm":
         memory_fraction_kind = "of_free"
