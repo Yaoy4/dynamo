@@ -79,8 +79,13 @@ _KAPA_LOGGER_NAMES = (
 
 def _configure_kapa_logging() -> None:
     """Expose KAPA lifecycle logs without enabling every Python logger."""
-    raw_mode = os.environ.get("DYNAMO_AIC_KAPA_CACHE")
-    if raw_mode is None or raw_mode.strip().lower() in {
+    raw_modes = [
+        os.environ.get("DYNAMO_AIC_KAPA_CACHE"),
+        os.environ.get("DYNAMO_AIC_KAPA_LOOKUP_CACHE"),
+        os.environ.get("DYNAMO_AIC_KAPA_RUNTIME_CACHE"),
+    ]
+    disabled = {
+        None,
         "off",
         "0",
         "false",
@@ -88,7 +93,8 @@ def _configure_kapa_logging() -> None:
         "none",
         "disable",
         "disabled",
-    }:
+    }
+    if all(mode is None or mode.strip().lower() in disabled for mode in raw_modes):
         return
 
     for logger_name in _KAPA_LOGGER_NAMES:

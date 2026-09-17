@@ -71,6 +71,29 @@ def test_replay_api_and_cli_route_trace_file_lists(monkeypatch):
     assert cli_calls[0][1]["trace_block_size"] is None
 
 
+def test_replay_prints_kapa_cache_stats_as_multiline_json(monkeypatch, capsys):
+    monkeypatch.setattr(
+        replay_main,
+        "run_trace_replay",
+        lambda trace_files, **kwargs: ReplayReport(
+            summary={}, per_request=None, coverage={}, planner=None
+        ),
+    )
+    monkeypatch.setattr(
+        replay_main, "get_kapa_cache_stats", lambda: {"tgs": {"hit_rate": 1.0}}
+    )
+    monkeypatch.setattr(replay_main, "format_report_table", lambda report: "")
+    monkeypatch.setattr(
+        replay_main, "write_report_json", lambda report, path: "report.json"
+    )
+
+    assert replay_main.main(["trace.jsonl"]) == 0
+
+    assert capsys.readouterr().err == (
+        'KAPA cache stats:\n{\n  "tgs": {\n    "hit_rate": 1.0\n  }\n}\n'
+    )
+
+
 def test_planner_replay_rejects_empty_dynamo_trace_list():
     with pytest.raises(
         ValueError,

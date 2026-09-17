@@ -9,7 +9,7 @@
 
 use crate::common::protocols::MockEngineArgs;
 
-const DEFAULT_G1_G2_BANDWIDTH_GBPS: f64 = 14.0;
+const DEFAULT_G1_G2_BANDWIDTH_GBPS: f64 = 64.0;
 const DEFAULT_G2_G3_BANDWIDTH_GBPS: f64 = 7.0;
 const DEFAULT_G2_G4_BANDWIDTH_GBPS: f64 = 4.0;
 

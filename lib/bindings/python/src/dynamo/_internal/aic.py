@@ -42,9 +42,12 @@ DATABASE_MODE_ANALYTICAL = "ANALYTICAL"
 _ANALYTICAL_SDK_MODE = "EMPIRICAL"
 _SUPPORTED_DATABASE_MODES = (DATABASE_MODE_SILICON, DATABASE_MODE_ANALYTICAL)
 
-# Optional shared analytical-result cache.  It is deliberately opt-in because
-# the package and database live outside Dynamo's normal installation.
+# Optional shared analytical-result caches. They are deliberately opt-in
+# because the package and database live outside Dynamo's normal installation.
+# The legacy combined variable remains a fallback for both layers.
 _KAPA_CACHE_MODE_ENV = "DYNAMO_AIC_KAPA_CACHE"
+_KAPA_LOOKUP_CACHE_MODE_ENV = "DYNAMO_AIC_KAPA_LOOKUP_CACHE"
+_KAPA_RUNTIME_CACHE_MODE_ENV = "DYNAMO_AIC_KAPA_RUNTIME_CACHE"
 _KAPA_CONFIG_ENV = "KAPA_DATA_CONFIG"
 _KAPA_VERSION_ENV = "DYNAMO_AIC_KAPA_VERSION"
 
@@ -92,6 +95,8 @@ def _activate_analytical_backend(
         system,
         xe_compute_config,
         kapa_cache_mode=os.environ.get(_KAPA_CACHE_MODE_ENV),
+        kapa_lookup_cache_mode=os.environ.get(_KAPA_LOOKUP_CACHE_MODE_ENV),
+        kapa_runtime_cache_mode=os.environ.get(_KAPA_RUNTIME_CACHE_MODE_ENV),
         kapa_config_path=os.environ.get(_KAPA_CONFIG_ENV),
         kapa_backend=backend_name,
         kapa_version=os.environ.get(_KAPA_VERSION_ENV),
