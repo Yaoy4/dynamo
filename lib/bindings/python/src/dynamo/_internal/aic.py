@@ -39,7 +39,7 @@ DATABASE_MODE_ANALYTICAL = "ANALYTICAL"
 # The mode the SDK itself runs under while the analytical backend is patched in:
 # kernels the Xe backend does not implement must fall back to roofline formulas
 # derived from the system YAML, never to a CSV lookup that does not exist.
-_ANALYTICAL_SDK_MODE = "EMPIRICAL"
+_ANALYTICAL_SDK_MODE = "SOL"
 _SUPPORTED_DATABASE_MODES = (DATABASE_MODE_SILICON, DATABASE_MODE_ANALYTICAL)
 
 # Optional shared analytical-result caches. They are deliberately opt-in
@@ -86,9 +86,19 @@ def _activate_analytical_backend(
     try:
         from intel_xe import analytical_session
     except ModuleNotFoundError as exc:
+        # intel_xe's own __init__ eagerly imports third-party deps (yaml,
+        # aiconfigurator, ...); a missing one of those also raises
+        # ModuleNotFoundError here and must not be misreported as "intel_xe
+        # is not installed" when intel_xe itself is present.
+        if exc.name == "intel_xe" or (exc.name or "").startswith("intel_xe."):
+            raise RuntimeError(
+                f"aic_database_mode={DATABASE_MODE_ANALYTICAL} needs the 'intel_xe' package "
+                "from the Intel aiconfigurator distribution, which is not installed"
+            ) from exc
         raise RuntimeError(
-            f"aic_database_mode={DATABASE_MODE_ANALYTICAL} needs the 'intel_xe' package "
-            "from the Intel aiconfigurator distribution, which is not installed"
+            f"aic_database_mode={DATABASE_MODE_ANALYTICAL}: 'intel_xe' is installed but "
+            f"failed to import because its dependency {exc.name!r} is missing in this "
+            f"Python environment ({sys.executable}): {exc}"
         ) from exc
 
     analytical_session.activate(
